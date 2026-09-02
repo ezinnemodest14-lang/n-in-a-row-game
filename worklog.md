@@ -130,3 +130,20 @@ Work Log:
 
 Stage Summary:
 - COMPLETE REPLICA DELIVERED: full-stack N-in-a-Row (Next.js 16 + Prisma SQLite + NN mini-service) — engine v3, store, API, NN blend, overlay UI with auto-peek, black+green eval bar, warm translucent acrylic, no-jiggle animations. All golden paths browser-verified.
+
+---
+Task ID: 8
+Agent: Z.ai Code (main)
+Task: Restart the dev server (user request after session continuation)
+
+Work Log:
+- Found both servers dead at session start (prior session's processes were reaped). First restart attempts with nohup/setsid got reaped between tool calls (HTTP 000 on follow-up checks).
+- Investigated sandbox: PID 1 = tini -> /start.sh, which at boot runs bun install -> db:push -> `bun run dev` (port 3000) -> starts all mini-services (bun run dev per subdir) -> Caddy. Platform reaps arbitrary agent-spawned background processes, but processes started via the blessed `.zscripts/dev.sh` flow persist (same mechanism agent-browser uses).
+- Read .zscripts/dev.log: found historical `POST /api/game/new 500` (missing `legalMoves` export from mcts.ts) — verified ALREADY FIXED (mcts.ts L35 re-exports legalMoves from threat-classifier.ts); also found the boot server was SIGTERM'd ("Polite quit request") = my pkill at session start.
+- Restarted via the blessed flow: `(setsid nohup bash .zscripts/dev.sh > .zscripts/dev.log 2>&1 < /dev/null &)` — runs install + db:push + dev server + health check + mini-services.
+- Survival verified across separate tool calls: Next.js HTTP 200, NN service healthy.
+- End-to-end smoke tests: /api/game/new ok:true with fresh 15x15 state; /api/game/move (pre-move board contract, row/col fields) -> human stone applied, AI replied, full analysis payload (evalScore, winProb 46, aiCandidateMoves, criticalSquares, tempo, boardControl, scoringAnalysis), NN blend visible ("Played M5 — ... (NN eval: 56.1%)"), crossGameLearning {inherited, priorVisits} present. RAVE db intact (db/custom.db 45KB).
+
+Stage Summary:
+- Servers running & STABLE across tool calls via blessed `.zscripts/dev.sh` mechanism. Restart command if ever needed again: cd /home/z/my-project && (setsid nohup bash .zscripts/dev.sh > .zscripts/dev.log 2>&1 < /dev/null &) — wait ~12s, then curl localhost:3000 and localhost:3020/health.
+- Full stack re-verified working end-to-end after restart. NN weights restored (4,885 samples). No code changes needed this task.
