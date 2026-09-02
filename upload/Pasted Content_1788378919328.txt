@@ -1,0 +1,1801 @@
+import React, { useState, useEffect, useRef, useCallback } from "react";
+import { RotateCcw, Zap, Settings as SettingsIcon, X, ChevronUp, ChevronDown, Shield } from "lucide-react";
+// ============================================================================
+// CORE GAME LOGIC — pure functions, no UI, no browser APIs.
+// Testable standalone (node), then imported verbatim into the React artifact.
+// ============================================================================
+
+// ---------------------------------------------------------------------------
+// Board primitives
+// ---------------------------------------------------------------------------
+export function emptyBoard(n) {
+  return new Int8Array(n * n);
+}
+export function idx(n, r, c) {
+  return r * n + c;
+}
+export function inBounds(n, r, c) {
+  return r >= 0 && r < n && c >= 0 && c < n;
+}
+export function legalMoves(board) {
+  const moves = [];
+  for (let i = 0; i < board.length; i++) if (board[i] === 0) moves.push(i);
+  return moves;
+}
+export function cloneBoard(board) {
+  return board.slice();
+}
+
+const DIRS = [
+  [0, 1],
+  [1, 0],
+  [1, 1],
+  [1, -1],
+];
+
+// ---------------------------------------------------------------------------
+// Win detection (Classic mode)
+// ---------------------------------------------------------------------------
+export function checkWinAt(board, n, winLen, r, c, player) {
+  for (const [dr, dc] of DIRS) {
+    let count = 1;
+    let rr = r + dr,
+      cc = c + dc;
+    while (inBounds(n, rr, cc) && board[idx(n, rr, cc)] === player) {
+      count++;
+      rr += dr;
+      cc += dc;
+    }
+    rr = r - dr;
+    cc = c - dc;
+    while (inBounds(n, rr, cc) && board[idx(n, rr, cc)] === player) {
+      count++;
+      rr -= dr;
+      cc -= dc;
+    }
+    if (count >= winLen) return true;
+  }
+  return false;
+}
+
+// ---------------------------------------------------------------------------
+// Score Attack scoring — window-counting formula, verified earlier in this
+// project (rule-learning demo). Ported unchanged, just re-indexed for a
+// flat Int8Array board.
+// ---------------------------------------------------------------------------
+export const SCORE_WEIGHTS = {
+  triple: 1,
+  four: 5,
+  five: 15,
+  fullRow: 10,
+  fullCol: 10,
+  fullDiag: 20,
+  cross: 3,
+  linebreak: 2,
+};
+const SCORE_KEYS = Object.keys(SCORE_WEIGHTS);
+
+export function scoreMoveFeatures(board, n, row, col, player) {
+  const opp = player === 1 ? 2 : 1;
+  const feat = Object.fromEntries(SCORE_KEYS.map((k) => [k, 0]));
+  let horiz3 = false,
+    vert3 = false;
+  for (const [dr, dc] of DIRS) {
+    let left = 0,
+      r = row - dr,
+      c = col - dc;
+    while (inBounds(n, r, c) && board[idx(n, r, c)] === player) {
+      left++;
+      r -= dr;
+      c -= dc;
+    }
+    let right = 0;
+    r = row + dr;
+    c = col + dc;
+    while (inBounds(n, r, c) && board[idx(n, r, c)] === player) {
+      right++;
+      r += dr;
+      c += dc;
+    }
+    const runLen = left + 1 + right,
+      offset = left;
+    for (const [K, key] of [
+      [3, "triple"],
+      [4, "four"],
+      [5, "five"],
+    ]) {
+      if (runLen >= K) {
+        const startMin = Math.max(0, offset - (K - 1));
+        const startMax = Math.min(offset, runLen - K);
+        feat[key] += Math.max(0, startMax - startMin + 1);
+      }
+    }
+    if (dr === 0 && dc === 1 && runLen >= 3) horiz3 = true;
+    if (dr === 1 && dc === 0 && runLen >= 3) vert3 = true;
+    const l1r = row - dr,
+      l1c = col - dc,
+      r1r = row + dr,
+      r1c = col + dc;
+    if (
+      inBounds(n, l1r, l1c) &&
+      inBounds(n, r1r, r1c) &&
+      board[idx(n, l1r, l1c)] === opp &&
+      board[idx(n, r1r, r1c)] === opp
+    ) {
+      feat.linebreak += 1;
+    }
+  }
+  if (horiz3 && vert3) feat.cross = 1;
+  const cellVal = (r, c) => (r === row && c === col ? player : board[idx(n, r, c)]);
+  let fullRow = true;
+  for (let c = 0; c < n; c++)
+    if (cellVal(row, c) !== player) {
+      fullRow = false;
+      break;
+    }
+  let fullCol = true;
+  for (let r = 0; r < n; r++)
+    if (cellVal(r, col) !== player) {
+      fullCol = false;
+      break;
+    }
+  feat.fullRow = fullRow ? 1 : 0;
+  feat.fullCol = fullCol ? 1 : 0;
+  let fullDiag = 0;
+  if (row === col) {
+    let ok = true;
+    for (let i = 0; i < n; i++)
+      if (cellVal(i, i) !== player) {
+        ok = false;
+        break;
+      }
+    if (ok) fullDiag += 1;
+  }
+  if (row + col === n - 1) {
+    let ok = true;
+    for (let i = 0; i < n; i++)
+      if (cellVal(i, n - 1 - i) !== player) {
+        ok = false;
+        break;
+      }
+    if (ok) fullDiag += 1;
+  }
+  feat.fullDiag = fullDiag;
+  return feat;
+}
+
+export function scoreMoveDelta(board, n, row, col, player) {
+  const f = scoreMoveFeatures(board, n, row, col, player);
+  return SCORE_KEYS.reduce((s, k) => s + f[k] * SCORE_WEIGHTS[k], 0);
+}
+
+export function computeFullScore(board, n) {
+  const totals = { 1: 0, 2: 0 };
+  for (let p = 1; p <= 2; p++) {
+    const seen = { triple: new Set(), four: new Set(), five: new Set() };
+    for (let r = 0; r < n; r++) {
+      for (let c = 0; c < n; c++) {
+        if (board[idx(n, r, c)] !== p) continue;
+        for (const [dr, dc] of DIRS) {
+          for (const [K, key] of [
+            [3, "triple"],
+            [4, "four"],
+            [5, "five"],
+          ]) {
+            let ok = true;
+            const cells = [];
+            for (let k = 0; k < K; k++) {
+              const rr = r + dr * k,
+                cc = c + dc * k;
+              if (!inBounds(n, rr, cc) || board[idx(n, rr, cc)] !== p) {
+                ok = false;
+                break;
+              }
+              cells.push(idx(n, rr, cc));
+            }
+            if (ok) seen[key].add(cells.join(","));
+          }
+        }
+      }
+    }
+    let total =
+      seen.triple.size * SCORE_WEIGHTS.triple + seen.four.size * SCORE_WEIGHTS.four + seen.five.size * SCORE_WEIGHTS.five;
+    for (let r = 0; r < n; r++) {
+      for (let c = 0; c < n; c++) {
+        if (board[idx(n, r, c)] !== p) continue;
+        let h = false,
+          v = false;
+        for (const [dr, dc, flag] of [
+          [0, 1, "h"],
+          [1, 0, "v"],
+        ]) {
+          let left = 0,
+            rr = r - dr,
+            cc = c - dc;
+          while (inBounds(n, rr, cc) && board[idx(n, rr, cc)] === p) {
+            left++;
+            rr -= dr;
+            cc -= dc;
+          }
+          let right = 0;
+          rr = r + dr;
+          cc = c + dc;
+          while (inBounds(n, rr, cc) && board[idx(n, rr, cc)] === p) {
+            right++;
+            rr += dr;
+            cc += dc;
+          }
+          if (left + 1 + right >= 3) {
+            if (flag === "h") h = true;
+            else v = true;
+          }
+        }
+        if (h && v) total += SCORE_WEIGHTS.cross;
+      }
+    }
+    for (let r = 0; r < n; r++) {
+      let full = true;
+      for (let c = 0; c < n; c++)
+        if (board[idx(n, r, c)] !== p) {
+          full = false;
+          break;
+        }
+      if (full) total += SCORE_WEIGHTS.fullRow;
+    }
+    for (let c = 0; c < n; c++) {
+      let full = true;
+      for (let r = 0; r < n; r++)
+        if (board[idx(n, r, c)] !== p) {
+          full = false;
+          break;
+        }
+      if (full) total += SCORE_WEIGHTS.fullCol;
+    }
+    let mainOk = true;
+    for (let i = 0; i < n; i++)
+      if (board[idx(n, i, i)] !== p) {
+        mainOk = false;
+        break;
+      }
+    if (mainOk) total += SCORE_WEIGHTS.fullDiag;
+    let antiOk = true;
+    for (let i = 0; i < n; i++)
+      if (board[idx(n, i, n - 1 - i)] !== p) {
+        antiOk = false;
+        break;
+      }
+    if (antiOk) total += SCORE_WEIGHTS.fullDiag;
+    totals[p] = total;
+  }
+  return totals;
+}
+
+// ---------------------------------------------------------------------------
+// LAYER 0.5 — Threat Classifier
+// For every empty cell + direction: "if I play here, what does this become?"
+// ---------------------------------------------------------------------------
+export const CAT = {
+  NONE: 0,
+  ONE: 1,
+  TWO: 2,
+  SIMPLE_THREE: 3,
+  BROKEN_THREE: 4,
+  OPEN_THREE: 5,
+  SIMPLE_FOUR: 6,
+  OPEN_FOUR: 7,
+  WIN: 8,
+};
+export const CAT_NAME = {
+  0: "None",
+  1: "One",
+  2: "Two",
+  3: "Simple three",
+  4: "Broken three",
+  5: "Open three",
+  6: "Simple four",
+  7: "Open four",
+  8: "Five — wins",
+};
+export const CAT_VALUE = { 0: 0, 1: 5, 2: 50, 3: 300, 4: 1200, 5: 3000, 6: 8000, 7: 20000, 8: 1000000 };
+
+function classifyDirection(board, n, row, col, dr, dc, player, winLen) {
+  let left = 0,
+    r = row - dr,
+    c = col - dc;
+  while (inBounds(n, r, c) && board[idx(n, r, c)] === player) {
+    left++;
+    r -= dr;
+    c -= dc;
+  }
+  const leftOpen = inBounds(n, r, c) && board[idx(n, r, c)] === 0;
+  let right = 0;
+  r = row + dr;
+  c = col + dc;
+  while (inBounds(n, r, c) && board[idx(n, r, c)] === player) {
+    right++;
+    r += dr;
+    c += dc;
+  }
+  const rightOpen = inBounds(n, r, c) && board[idx(n, r, c)] === 0;
+  const runLen = left + 1 + right;
+  const gap = winLen - runLen;
+
+  if (runLen >= winLen) return CAT.WIN;
+  if (gap === 1) {
+    if (leftOpen && rightOpen) return CAT.OPEN_FOUR;
+    if (leftOpen || rightOpen) return CAT.SIMPLE_FOUR;
+    return CAT.NONE;
+  }
+  if (gap === 2) {
+    if (!leftOpen && !rightOpen) return CAT.NONE;
+    if (leftOpen && rightOpen) {
+      const leftExtendOpen = (() => {
+        const rr = row - dr * (left + 2),
+          cc = col - dc * (left + 2);
+        return inBounds(n, rr, cc) && board[idx(n, rr, cc)] === 0;
+      })();
+      const rightExtendOpen = (() => {
+        const rr = row + dr * (right + 2),
+          cc = col + dc * (right + 2);
+        return inBounds(n, rr, cc) && board[idx(n, rr, cc)] === 0;
+      })();
+      return leftExtendOpen || rightExtendOpen ? CAT.OPEN_THREE : CAT.BROKEN_THREE;
+    }
+    return CAT.SIMPLE_THREE;
+  }
+  if (gap === 3) return runLen >= 2 ? CAT.TWO : CAT.ONE;
+  if (runLen >= 1) return CAT.ONE;
+  return CAT.NONE;
+}
+
+export function classifyCell(board, n, row, col, player, winLen) {
+  let best = CAT.NONE,
+    second = CAT.NONE,
+    strongDirs = 0,
+    bestDir = null;
+  for (const [dr, dc] of DIRS) {
+    const cat = classifyDirection(board, n, row, col, dr, dc, player, winLen);
+    if (cat >= CAT.OPEN_THREE) strongDirs++;
+    if (cat > best) {
+      second = best;
+      best = cat;
+      bestDir = [dr, dc];
+    } else if (cat > second) {
+      second = cat;
+    }
+  }
+  return {
+    category: best,
+    secondCategory: second,
+    isFork: strongDirs >= 2,
+    score: CAT_VALUE[best] + 0.3 * CAT_VALUE[second],
+    direction: bestDir,
+  };
+}
+
+export function classifyBoard(board, n, player, winLen) {
+  const out = new Map();
+  for (let i = 0; i < board.length; i++) {
+    if (board[i] !== 0) continue;
+    const row = Math.floor(i / n),
+      col = i % n;
+    out.set(i, classifyCell(board, n, row, col, player, winLen));
+  }
+  return out;
+}
+
+// Signed static eval: POSITIVE always means the human player is ahead.
+// This exact sign was inverted for a long time in the reference project
+// (rebuild-spec bug #15) — kept as one single, explicit, tested formula.
+export function evaluatePosition(board, n, winLen) {
+  function sideTotal(player) {
+    let total = 0;
+    for (let i = 0; i < board.length; i++) {
+      if (board[i] !== 0) continue;
+      const row = Math.floor(i / n),
+        col = i % n;
+      const c = classifyCell(board, n, row, col, player, winLen);
+      total += CAT_VALUE[c.category] * 0.001 + CAT_VALUE[c.secondCategory] * 0.0003;
+    }
+    return total;
+  }
+  const playerTotal = sideTotal(1);
+  const aiTotal = sideTotal(2);
+  const diff = playerTotal - aiTotal;
+  return { raw: diff, display: Math.max(-100, Math.min(100, Math.round(Math.tanh(diff / 40) * 100))) };
+}
+
+// ---------------------------------------------------------------------------
+// Tactical safety net
+// ---------------------------------------------------------------------------
+export function tacticalMove(board, n, winLen, me, opp) {
+  const myCells = classifyBoard(board, n, me, winLen);
+  const oppCells = classifyBoard(board, n, opp, winLen);
+
+  for (const [cell, c] of myCells) if (c.category === CAT.WIN) return { cell, reason: "win" };
+  for (const [cell, c] of oppCells) if (c.category === CAT.WIN) return { cell, reason: "block-win" };
+  for (const [cell, c] of myCells) if (c.category === CAT.OPEN_FOUR) return { cell, reason: "open-four" };
+  for (const [cell, c] of oppCells) if (c.category === CAT.SIMPLE_FOUR) return { cell, reason: "block-four" };
+  for (const [cell, c] of oppCells) if (c.category === CAT.OPEN_FOUR) return { cell, reason: "block-open-four" };
+  let bestFork = null;
+  for (const [cell, c] of myCells) {
+    if (c.isFork && (!bestFork || c.score > bestFork.score)) bestFork = { cell, score: c.score };
+  }
+  if (bestFork) return { cell: bestFork.cell, reason: "fork" };
+  for (const [cell, c] of oppCells) if (c.category === CAT.OPEN_THREE) return { cell, reason: "block-open-three" };
+  return null;
+}
+
+// ---------------------------------------------------------------------------
+// GlobalRAVE — per-(boardSize,mode) cross-move / cross-game memory.
+// ---------------------------------------------------------------------------
+export class GlobalRAVE {
+  constructor(n) {
+    this.n = n;
+    this.visits = { 1: new Float64Array(n * n), 2: new Float64Array(n * n) };
+    this.wins = { 1: new Float64Array(n * n), 2: new Float64Array(n * n) };
+  }
+  update(player, cell, reward) {
+    this.visits[player][cell] += 1;
+    this.wins[player][cell] += reward;
+  }
+  getRate(player, cell) {
+    const v = this.visits[player][cell];
+    return v === 0 ? 0.5 : this.wins[player][cell] / v;
+  }
+  getVisits(player, cell) {
+    return this.visits[player][cell];
+  }
+  decay(factor) {
+    for (const p of [1, 2]) {
+      for (let i = 0; i < this.visits[p].length; i++) {
+        this.visits[p][i] *= factor;
+        this.wins[p][i] *= factor;
+      }
+    }
+  }
+  totalVisits() {
+    let t = 0;
+    for (const p of [1, 2]) for (let i = 0; i < this.visits[p].length; i++) t += this.visits[p][i];
+    return Math.round(t);
+  }
+  toJSON() {
+    return {
+      n: this.n,
+      v1: Array.from(this.visits[1]),
+      v2: Array.from(this.visits[2]),
+      w1: Array.from(this.wins[1]),
+      w2: Array.from(this.wins[2]),
+    };
+  }
+  static fromJSON(obj) {
+    const g = new GlobalRAVE(obj.n);
+    g.visits[1] = Float64Array.from(obj.v1);
+    g.visits[2] = Float64Array.from(obj.v2);
+    g.wins[1] = Float64Array.from(obj.w1);
+    g.wins[2] = Float64Array.from(obj.w2);
+    return g;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// MCTS + RAVE
+// RAVE signal is read directly from the persistent GlobalRAVE table at every
+// node (root and internal) rather than maintained as a second, separate
+// per-node bookkeeping structure — simpler, and consistent with this
+// project's actual design (the global table IS the RAVE source of truth,
+// including inside playouts; see rebuild-spec Part B.2).
+// ---------------------------------------------------------------------------
+function mulberry32(seed) {
+  let s = seed;
+  return function () {
+    s |= 0;
+    s = (s + 0x6d2b79f5) | 0;
+    let t = Math.imul(s ^ (s >>> 15), 1 | s);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+class MCTSNode {
+  constructor(player) {
+    this.player = player; // player about to move AT this node
+    this.children = new Map();
+    this.untried = null;
+    this.visits = 0;
+    this.wins = 0; // see backprop convention below
+  }
+}
+
+function raveBeta(visits, C = 220) {
+  return Math.sqrt(C / (3 * visits + C));
+}
+
+function pickPlayoutMove(board, n, winLen, mode, player, opp, globalRave, rng) {
+  const tac = tacticalMove(board, n, winLen, player, opp);
+  if (tac) return tac.cell;
+  const moves = legalMoves(board);
+  if (!moves.length) return null;
+  const weights = [];
+  let sum = 0;
+  for (const cell of moves) {
+    const row = Math.floor(cell / n),
+      col = cell % n;
+    let w;
+    if (mode === "classic") {
+      const c = classifyCell(board, n, row, col, player, winLen);
+      w = 1 + c.score * 0.02;
+    } else {
+      w = 1 + scoreMoveDelta(board, n, row, col, player) * 3 + scoreMoveDelta(board, n, row, col, opp) * 1.5;
+    }
+    w *= 0.6 + 0.8 * globalRave.getRate(player, cell);
+    weights.push(w);
+    sum += w;
+  }
+  let x = rng() * sum;
+  for (let i = 0; i < moves.length; i++) {
+    x -= weights[i];
+    if (x <= 0) return moves[i];
+  }
+  return moves[moves.length - 1];
+}
+
+function runPlayout(board, n, winLen, mode, startPlayer, globalRave, rng, maxMoves) {
+  const work = cloneBoard(board);
+  let player = startPlayer;
+  const played = [];
+  let winner = 0;
+  let moves = 0;
+  while (moves < maxMoves) {
+    const opp = player === 1 ? 2 : 1;
+    const cell = pickPlayoutMove(work, n, winLen, mode, player, opp, globalRave, rng);
+    if (cell === null) break;
+    const row = Math.floor(cell / n),
+      col = cell % n;
+    work[cell] = player;
+    played.push({ player, cell });
+    if (mode === "classic" && checkWinAt(work, n, winLen, row, col, player)) {
+      winner = player;
+      break;
+    }
+    player = opp;
+    moves++;
+  }
+  let scoreDiff = 0;
+  if (mode === "scoring" && legalMoves(work).length === 0) {
+    const totals = computeFullScore(work, n);
+    scoreDiff = totals[1] - totals[2];
+  }
+  return { played, winner, scoreDiff };
+}
+
+// ---------------------------------------------------------------------------
+// Quick Train — fast self-play using the SAME lightweight policy playouts
+// use (tactical overrides + threat/score-weighted softmax), with NO tree
+// search. This is intentionally cheap so hundreds of games can run in a
+// fraction of a second, purely to seed GlobalRAVE before real play.
+// Historical bug to avoid (rebuild-spec bug #4): training must apply ZERO
+// decay, and playouts must be genuinely randomized, not greedy — both are
+// true here because this reuses the exact same runPlayout used inside MCTS.
+// ---------------------------------------------------------------------------
+export function trainGames(n, winLen, mode, count, globalRave, seedBase = 1) {
+  const rng = mulberry32(seedBase);
+  const outcomes = { p1: 0, p2: 0, draw: 0 };
+  for (let g = 0; g < count; g++) {
+    const board = emptyBoard(n);
+    const pl = runPlayout(board, n, winLen, mode, 1, globalRave, rng, n * n + 2);
+    let reward1; // outcome from player 1's perspective, in [0,1]
+    if (mode === "classic") {
+      reward1 = pl.winner === 1 ? 1 : pl.winner === 2 ? 0 : 0.5;
+      if (pl.winner === 1) outcomes.p1++;
+      else if (pl.winner === 2) outcomes.p2++;
+      else outcomes.draw++;
+    } else {
+      reward1 = 1 / (1 + Math.exp(-pl.scoreDiff / Math.max(4, n)));
+      if (pl.scoreDiff > 0) outcomes.p1++;
+      else if (pl.scoreDiff < 0) outcomes.p2++;
+      else outcomes.draw++;
+    }
+    // THIS is the step that was missing — runPlayout only returns the move
+    // list, it doesn't update GlobalRAVE itself (that happens in the
+    // caller in runMCTS's simulation step, which trainGames bypasses by
+    // calling runPlayout directly). Do it explicitly here.
+    for (const mv of pl.played) {
+      const r = mv.player === 1 ? reward1 : 1 - reward1;
+      globalRave.update(mv.player, mv.cell, r);
+    }
+  }
+  return outcomes;
+}
+
+export function runMCTS(opts) {
+  const {
+    board,
+    n,
+    winLen,
+    mode,
+    aiPlayer,
+    simulations = 1500,
+    timeLimitMs = 1500,
+    globalRave,
+    seed = 1,
+    priorWeight = 0.9,
+  } = opts;
+  const rng = mulberry32(seed);
+  const humanPlayer = aiPlayer === 1 ? 2 : 1;
+  const root = new MCTSNode(aiPlayer);
+  root.untried = legalMoves(board);
+
+  const threatPrior = mode === "classic" ? classifyBoard(board, n, aiPlayer, winLen) : null;
+  const threatPriorOpp = mode === "classic" ? classifyBoard(board, n, humanPlayer, winLen) : null;
+
+  const start = Date.now();
+  let sims = 0;
+  for (; sims < simulations; sims++) {
+    if ((sims & 31) === 0 && Date.now() - start > timeLimitMs) break;
+
+    // ---- Selection ----
+    let node = root;
+    const state = cloneBoard(board);
+    const path = [node];
+    let curPlayer = aiPlayer;
+    let terminal = false;
+    let terminalWinner = 0;
+
+    while (node.untried && node.untried.length === 0 && node.children.size > 0) {
+      let bestCell = null,
+        bestScore = -Infinity;
+      for (const [cell, child] of node.children) {
+        if (state[cell] !== 0) continue; // occupied-cell guard
+        const q = child.visits > 0 ? child.wins / child.visits : 0.5;
+        const uct = q + Math.SQRT2 * Math.sqrt(Math.log(node.visits + 1) / (child.visits + 1e-6));
+        const rv = globalRave.getVisits(node.player, cell);
+        const raveRate = globalRave.getRate(node.player, cell);
+        const beta = rv > 0 ? raveBeta(child.visits) : 0;
+        let score = beta * raveRate + (1 - beta) * uct;
+        if (node === root && threatPrior) {
+          const tp = curPlayer === aiPlayer ? threatPrior : threatPriorOpp;
+          const t = tp.get(cell);
+          if (t) {
+            const norm = Math.min(1, t.score / CAT_VALUE[CAT.OPEN_FOUR]);
+            score += (priorWeight * norm * Math.sqrt(Math.log(node.visits + 2))) / (child.visits + 8);
+          }
+        }
+        if (score > bestScore) {
+          bestScore = score;
+          bestCell = cell;
+        }
+      }
+      if (bestCell === null) break;
+      state[bestCell] = curPlayer;
+      const row = Math.floor(bestCell / n),
+        col = bestCell % n;
+      if (mode === "classic" && checkWinAt(state, n, winLen, row, col, curPlayer)) {
+        terminal = true;
+        terminalWinner = curPlayer;
+      }
+      node = node.children.get(bestCell);
+      path.push(node);
+      curPlayer = curPlayer === 1 ? 2 : 1;
+      if (terminal || legalMoves(state).length === 0) break;
+    }
+
+    // ---- Expansion ----
+    if (!terminal && legalMoves(state).length > 0) {
+      if (node.untried === null) node.untried = legalMoves(state);
+      node.untried = node.untried.filter((c) => state[c] === 0);
+      if (node.untried.length > 0) {
+        const i = Math.floor(rng() * node.untried.length);
+        const cell = node.untried[i];
+        node.untried.splice(i, 1);
+        state[cell] = curPlayer;
+        const row = Math.floor(cell / n),
+          col = cell % n;
+        const child = new MCTSNode(curPlayer === 1 ? 2 : 1);
+        node.children.set(cell, child);
+        if (mode === "classic" && checkWinAt(state, n, winLen, row, col, curPlayer)) {
+          terminal = true;
+          terminalWinner = curPlayer;
+        }
+        node = child;
+        path.push(node);
+        curPlayer = curPlayer === 1 ? 2 : 1;
+      }
+    }
+
+    // ---- Simulation ----
+    let reward1; // outcome from PLAYER 1's perspective, in [0,1]
+    let playoutMoves = [];
+    if (terminal) {
+      reward1 = terminalWinner === 1 ? 1 : 0;
+    } else if (legalMoves(state).length === 0 && mode === "classic") {
+      reward1 = 0.5;
+    } else {
+      const pl = runPlayout(state, n, winLen, mode, curPlayer, globalRave, rng, n * n + 2);
+      playoutMoves = pl.played;
+      if (mode === "classic") {
+        reward1 = pl.winner === 0 ? 0.5 : pl.winner === 1 ? 1 : 0;
+      } else {
+        reward1 = 1 / (1 + Math.exp(-pl.scoreDiff / Math.max(4, n)));
+      }
+    }
+    for (const mv of playoutMoves) {
+      const r = mv.player === 1 ? reward1 : 1 - reward1;
+      globalRave.update(mv.player, mv.cell, r);
+    }
+
+    // ---- Backprop ----
+    // Root always tracks value FOR aiPlayer (what "rootWinRate" reports).
+    path[0].visits += 1;
+    path[0].wins += aiPlayer === 1 ? reward1 : 1 - reward1;
+    // Every descendant tracks value for whoever MOVED to reach it, i.e.
+    // its parent's `.player` (the mover at the parent, which is exactly
+    // who selection compares children on behalf of).
+    for (let i = 1; i < path.length; i++) {
+      const moverToReachThis = path[i - 1].player;
+      path[i].visits += 1;
+      path[i].wins += moverToReachThis === 1 ? reward1 : 1 - reward1;
+    }
+  }
+
+  let bestCell = null,
+    bestVisits = -1;
+  const rootChildren = [];
+  for (const [cell, child] of root.children) {
+    if (board[cell] !== 0) continue;
+    rootChildren.push({ cell, visits: child.visits, winRate: child.visits > 0 ? child.wins / child.visits : 0 });
+    if (child.visits > bestVisits) {
+      bestVisits = child.visits;
+      bestCell = cell;
+    }
+  }
+  rootChildren.sort((a, b) => b.visits - a.visits);
+
+  const override = tacticalMove(board, n, winLen, aiPlayer, humanPlayer);
+  if (override && board[override.cell] === 0) bestCell = override.cell;
+  if (bestCell === null || board[bestCell] !== 0) {
+    const lm = legalMoves(board);
+    bestCell = lm[Math.floor(rng() * lm.length)];
+  }
+
+  const rootWinRate = root.visits > 0 ? root.wins / root.visits : 0.5;
+  return {
+    move: bestCell,
+    reason: override ? override.reason : "search",
+    simulations: sims,
+    elapsedMs: Date.now() - start,
+    rootWinRate,
+    raveBeta: raveBeta(root.visits),
+    topChildren: rootChildren.slice(0, 6),
+    totalVisits: root.visits,
+  };
+}
+
+// ============================================================================
+// REACT UI LAYER
+// ============================================================================
+const COLORS = {
+  app: "#14171c",
+  panel: "#1b2028",
+  panelAlt: "#212832",
+  border: "#2b323d",
+  text: "#e9ecf1",
+  textMuted: "#8b95a5",
+  textFaint: "#5b6472",
+  boardFrame: "#4a3626",
+  cell: "#d9ab5f",
+  cellLine: "#5f4a30",
+  stone1: "#f2ead8",
+  stone1Ring: "#c2b190",
+  stone2: "#20242a",
+  accent: "#3f8f5f",
+  accentHover: "#4aa26b",
+  alert: "#c0483f",
+  amber: "#c98a3b",
+};
+
+const CAT_COLOR = {
+  0: COLORS.textFaint,
+  1: COLORS.textFaint,
+  2: COLORS.textFaint,
+  3: COLORS.textMuted,
+  4: COLORS.amber,
+  5: COLORS.amber,
+  6: COLORS.alert,
+  7: COLORS.alert,
+  8: COLORS.alert,
+};
+
+function colLabel(c) {
+  return String.fromCharCode(65 + c);
+}
+function rowLabel(r, n) {
+  return n - r;
+}
+function cellLabel(cell, n) {
+  return colLabel(cell % n) + rowLabel(Math.floor(cell / n), n);
+}
+
+function freshGame(n, firstPlayer) {
+  return {
+    board: emptyBoard(n),
+    player: firstPlayer,
+    status: "playing",
+    winner: 0,
+    moveHistory: [],
+    scores: { 1: 0, 2: 0 },
+  };
+}
+
+const REASON_TEXT = {
+  win: "Completes a winning line.",
+  "block-win": "Blocking your winning line — one more move and you'd have won.",
+  "open-four": "Creates an open four — unstoppable next turn from either end.",
+  "block-four": "Blocking your simple four before it could complete.",
+  "block-open-four": "Trying to slow an open four — it likely can't be fully stopped now.",
+  fork: "Creates a fork — two live threats at once, so only one can be blocked.",
+  "block-open-three": "Blocking your open three before it becomes an open four.",
+  search: "No forcing move available — playing the strongest position the search found.",
+};
+
+function countThreats(board, n, player, winLen) {
+  const keys = ["SIMPLE_THREE", "BROKEN_THREE", "OPEN_THREE", "SIMPLE_FOUR", "OPEN_FOUR"];
+  const counts = Object.fromEntries(keys.map((k) => [k, 0]));
+  const cells = classifyBoard(board, n, player, winLen);
+  for (const [, c] of cells) {
+    for (const k of keys) if (CAT[k] === c.category) counts[k]++;
+  }
+  return counts;
+}
+
+function buildScoringAnalysis(board, n, scores) {
+  const remaining = legalMoves(board).length;
+  const filled = n * n - remaining;
+  const fillPct = Math.round((filled / (n * n)) * 100);
+  const halfFilled = Math.max(1, filled / 2);
+  const playerPace = scores[1] / halfFilled;
+  const aiPace = scores[2] / halfFilled;
+  const halfRemaining = remaining / 2;
+  const projPlayer = Math.round(scores[1] + playerPace * halfRemaining);
+  const projAi = Math.round(scores[2] + aiPace * halfRemaining);
+
+  const playerMoves = legalMoves(board)
+    .map((cell) => {
+      const row = Math.floor(cell / n),
+        col = cell % n;
+      return { cell, delta: scoreMoveDelta(board, n, row, col, 1) };
+    })
+    .filter((m) => m.delta > 0)
+    .sort((a, b) => b.delta - a.delta)
+    .slice(0, 5);
+
+  const aiThreats = legalMoves(board)
+    .map((cell) => {
+      const row = Math.floor(cell / n),
+        col = cell % n;
+      return { cell, delta: scoreMoveDelta(board, n, row, col, 2) };
+    })
+    .filter((m) => m.delta > 0)
+    .sort((a, b) => b.delta - a.delta)
+    .slice(0, 5);
+
+  return { remaining, fillPct, playerPace, aiPace, projPlayer, projAi, playerMoves, aiThreats };
+}
+
+function buildAnalysis(board, n, winLen, mode, mctsResult, scores) {
+  const ev = evaluatePosition(board, n, winLen);
+  const aiWinPctRaw = Math.round(mctsResult.rootWinRate * 100);
+  const aiWinPct = Math.max(0, Math.min(100, aiWinPctRaw));
+  const playerWinPct = 100 - aiWinPct; // derive, never round both independently (bug #17)
+
+  const humanCells = classifyBoard(board, n, 1, winLen);
+  const humanOptions = [...humanCells.entries()]
+    .filter(([, c]) => c.category > CAT.NONE)
+    .sort((a, b) => b[1].score - a[1].score)
+    .slice(0, 5)
+    .map(([cell, c]) => ({ cell, category: c.category, isFork: c.isFork }));
+
+  const threats = { player: countThreats(board, n, 1, winLen), ai: countThreats(board, n, 2, winLen) };
+
+  return {
+    eval: ev,
+    playerWinPct,
+    aiWinPct,
+    aiReasonCell: mctsResult.move,
+    aiReason: mctsResult.reason,
+    humanOptions,
+    aiConsidered: mctsResult.topChildren,
+    threats,
+    mcts: {
+      simulations: mctsResult.simulations,
+      elapsedMs: mctsResult.elapsedMs,
+      raveBeta: mctsResult.raveBeta,
+      totalVisits: mctsResult.totalVisits,
+    },
+    scoring: mode === "scoring" ? buildScoringAnalysis(board, n, scores) : null,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Small building blocks
+// ---------------------------------------------------------------------------
+function IconBtn({ onClick, title, icon, label, active, disabled }) {
+  return (
+    <button
+      onClick={onClick}
+      title={title}
+      aria-label={title}
+      disabled={disabled}
+      style={{
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 6,
+        padding: "8px 12px",
+        minHeight: 40,
+        borderRadius: 8,
+        background: active ? COLORS.accent : COLORS.panelAlt,
+        color: active ? "#fff" : COLORS.text,
+        border: `1px solid ${active ? COLORS.accent : COLORS.border}`,
+        fontSize: 13.5,
+        fontWeight: 500,
+        cursor: disabled ? "default" : "pointer",
+        opacity: disabled ? 0.5 : 1,
+        whiteSpace: "nowrap",
+      }}
+    >
+      {icon}
+      <span className="ibtn-label">{label}</span>
+    </button>
+  );
+}
+
+function EvalBar({ playerPct, aiPct, thinking, mode, scores }) {
+  const playerFrac = mode === "scoring" ? (scores[1] + scores[2] > 0 ? scores[1] / (scores[1] + scores[2]) : 0.5) : playerPct / 100;
+  return (
+    <div style={{ width: 26, display: "flex", flexDirection: "column", alignItems: "center", opacity: thinking ? 0.35 : 1, transition: "opacity 160ms" }}>
+      <div style={{ fontSize: 10.5, color: COLORS.textFaint, marginBottom: 4, fontVariantNumeric: "tabular-nums" }}>
+        {mode === "scoring" ? scores[2] : Math.round(100 - playerFrac * 100) + "%"}
+      </div>
+      <div style={{ flex: 1, width: 16, borderRadius: 8, overflow: "hidden", background: COLORS.stone2, display: "flex", flexDirection: "column-reverse", position: "relative" }}>
+        <div style={{ height: `${Math.max(2, Math.min(98, playerFrac * 100))}%`, background: COLORS.accent, transition: "height 260ms ease" }} />
+        {thinking && (
+          <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center" }}>
+            <div style={{ width: 8, height: 8, borderRadius: "50%", background: "#fff", animation: "pulseDot 1s infinite" }} />
+          </div>
+        )}
+      </div>
+      <div style={{ fontSize: 10.5, color: COLORS.textFaint, marginTop: 4, fontVariantNumeric: "tabular-nums" }}>
+        {mode === "scoring" ? scores[1] : Math.round(playerFrac * 100) + "%"}
+      </div>
+    </div>
+  );
+}
+
+function Board({ n, board, onCellClick, disabled, lastMove, sizePx }) {
+  const cellPx = sizePx / n;
+  return (
+    <div style={{ background: COLORS.boardFrame, borderRadius: 10, padding: Math.max(6, cellPx * 0.18), display: "inline-block" }}>
+      <div style={{ display: "flex" }}>
+        <div style={{ display: "flex", flexDirection: "column", marginRight: 4 }}>
+          {Array.from({ length: n }, (_, r) => (
+            <div key={r} style={{ height: cellPx, display: "flex", alignItems: "center", justifyContent: "flex-end", fontSize: Math.max(9, cellPx * 0.28), color: COLORS.text, opacity: 0.65, width: 16, fontVariantNumeric: "tabular-nums" }}>
+              {rowLabel(r, n)}
+            </div>
+          ))}
+        </div>
+        <div>
+          <div
+            style={{
+              display: "grid",
+              gridTemplateColumns: `repeat(${n}, ${cellPx}px)`,
+              gridTemplateRows: `repeat(${n}, ${cellPx}px)`,
+              gap: 1,
+              background: COLORS.cellLine,
+            }}
+          >
+            {Array.from(board).map((val, i) => {
+              const isLast = lastMove === i;
+              return (
+                <button
+                  key={i}
+                  onClick={() => onCellClick(i)}
+                  disabled={disabled || val !== 0}
+                  style={{
+                    width: cellPx,
+                    height: cellPx,
+                    background: COLORS.cell,
+                    border: "none",
+                    padding: 0,
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    cursor: disabled || val !== 0 ? "default" : "pointer",
+                  }}
+                >
+                  {val !== 0 && (
+                    <div
+                      style={{
+                        width: cellPx - Math.max(4, cellPx * 0.16),
+                        height: cellPx - Math.max(4, cellPx * 0.16),
+                        borderRadius: "50%",
+                        background: val === 1 ? COLORS.stone1 : COLORS.stone2,
+                        boxShadow:
+                          val === 1
+                            ? `inset 0 0 0 1px ${COLORS.stone1Ring}, 0 1px 2px rgba(0,0,0,.35)${isLast ? `, 0 0 0 2px ${COLORS.accent}` : ""}`
+                            : `0 1px 2px rgba(0,0,0,.5)${isLast ? `, 0 0 0 2px ${COLORS.accent}` : ""}`,
+                    }}
+                  />
+                  )}
+                </button>
+              );
+            })}
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: `repeat(${n}, ${cellPx}px)`, marginTop: 4 }}>
+            {Array.from({ length: n }, (_, c) => (
+              <div key={c} style={{ textAlign: "center", fontSize: Math.max(9, cellPx * 0.28), color: COLORS.text, opacity: 0.65, fontVariantNumeric: "tabular-nums" }}>
+                {colLabel(c)}
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function CategoryChip({ category, isFork }) {
+  return (
+    <span
+      style={{
+        fontSize: 11,
+        padding: "2px 7px",
+        borderRadius: 999,
+        color: "#fff",
+        background: CAT_COLOR[category],
+        whiteSpace: "nowrap",
+      }}
+    >
+      {isFork ? "Fork" : CAT_NAME[category]}
+    </span>
+  );
+}
+
+function AnalysisPanel({ analysis, n, mode, expanded, onEnter, onLeave, onTap, peekDurationMs, setPeekDurationMs, thinking }) {
+  if (!analysis) {
+    return (
+      <div
+        onMouseEnter={onEnter}
+        onMouseLeave={onLeave}
+        onClick={onTap}
+        style={{
+          position: "absolute",
+          left: 0,
+          right: 0,
+          bottom: 0,
+          textAlign: "center",
+          padding: "8px 0",
+          fontSize: 12,
+          color: COLORS.textFaint,
+          cursor: "pointer",
+        }}
+      >
+        Play a move to see analysis
+      </div>
+    );
+  }
+  const ev = analysis.eval;
+  const evColor = ev.raw > 8 ? COLORS.accent : ev.raw < -8 ? COLORS.alert : COLORS.textMuted;
+  const evLabel = Math.abs(ev.raw) < 5 ? "Even" : ev.raw > 0 ? (ev.raw > 20 ? "Winning" : "Slight edge") : ev.raw < -20 ? "Losing" : "Slight edge (AI)";
+
+  return (
+    <div style={{ position: "absolute", left: 0, right: 0, bottom: 0 }}>
+      {!expanded && (
+        <div
+          onMouseEnter={onEnter}
+          onClick={onTap}
+          style={{
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            gap: 6,
+            padding: "7px 0",
+            fontSize: 12.5,
+            color: COLORS.text,
+            background: `linear-gradient(0deg, ${COLORS.panel}ee, transparent)`,
+            cursor: "pointer",
+          }}
+        >
+          <span style={{ width: 7, height: 7, borderRadius: "50%", background: evColor }} />
+          Analysis {ev.display > 0 ? "+" : ""}
+          {ev.display}
+          <ChevronUp size={13} />
+        </div>
+      )}
+      {expanded && (
+        <div
+          onMouseLeave={onLeave}
+          style={{
+            background: "rgba(27,32,40,0.92)",
+            backdropFilter: "blur(14px)",
+            borderTop: `1px solid ${COLORS.border}`,
+            borderRadius: "12px 12px 0 0",
+            maxHeight: "72%",
+            overflowY: "auto",
+            padding: 14,
+          }}
+        >
+          <div
+            onClick={onTap}
+            style={{ display: "flex", justifyContent: "space-between", alignItems: "center", cursor: "pointer", marginBottom: 10 }}
+          >
+            <span style={{ fontSize: 13, fontWeight: 600 }}>Analysis</span>
+            <ChevronDown size={15} color={COLORS.textMuted} />
+          </div>
+
+          <Section title="Position">
+            <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 4 }}>
+              <span style={{ fontSize: 20, fontWeight: 700, color: evColor, fontVariantNumeric: "tabular-nums" }}>
+                {ev.display > 0 ? "+" : ""}
+                {ev.display}
+              </span>
+              <span style={{ fontSize: 12.5, color: evColor }}>{evLabel}</span>
+            </div>
+            <div style={{ display: "flex", height: 6, borderRadius: 3, overflow: "hidden", marginBottom: 4 }}>
+              <div style={{ width: `${analysis.playerWinPct}%`, background: COLORS.accent }} />
+              <div style={{ width: `${analysis.aiWinPct}%`, background: COLORS.stone2 }} />
+            </div>
+            <div style={{ fontSize: 11, color: COLORS.textMuted }}>
+              You {analysis.playerWinPct}% · AI {analysis.aiWinPct}% win probability
+            </div>
+          </Section>
+
+          <Section title="AI reasoning">
+            <div style={{ fontSize: 12.5, color: COLORS.text }}>
+              Played {cellLabel(analysis.aiReasonCell, n)} — {REASON_TEXT[analysis.aiReason] || "Building position."}
+            </div>
+          </Section>
+
+          <TwoCol>
+            <Section title="Your best options">
+              {analysis.humanOptions.length === 0 && <Faint>No urgent options yet.</Faint>}
+              {analysis.humanOptions.map((o) => (
+                <Row key={o.cell}>
+                  <span style={{ fontVariantNumeric: "tabular-nums", fontWeight: 600, width: 34 }}>{cellLabel(o.cell, n)}</span>
+                  <CategoryChip category={o.category} isFork={o.isFork} />
+                </Row>
+              ))}
+            </Section>
+            <Section title="AI considered">
+              {analysis.aiConsidered.slice(0, 5).map((c) => {
+                const maxV = analysis.aiConsidered[0]?.visits || 1;
+                return (
+                  <Row key={c.cell}>
+                    <span style={{ fontVariantNumeric: "tabular-nums", fontWeight: 600, width: 34 }}>{cellLabel(c.cell, n)}</span>
+                    <div style={{ flex: 1, height: 5, borderRadius: 3, background: COLORS.panelAlt, overflow: "hidden" }}>
+                      <div style={{ width: `${(c.visits / maxV) * 100}%`, height: "100%", background: COLORS.amber }} />
+                    </div>
+                    <span style={{ fontSize: 11, color: COLORS.textFaint, width: 34, textAlign: "right" }}>{Math.round(c.winRate * 100)}%</span>
+                  </Row>
+                );
+              })}
+            </Section>
+          </TwoCol>
+
+          <Section title="Threats on the board">
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+              <ThreatList label="You" counts={analysis.threats.player} />
+              <ThreatList label="AI" counts={analysis.threats.ai} />
+            </div>
+          </Section>
+
+          {analysis.scoring && (
+            <Section title="Score forecast">
+              <div style={{ fontSize: 11.5, color: COLORS.textMuted, marginBottom: 6 }}>
+                {analysis.scoring.remaining} moves left · board {analysis.scoring.fillPct}% full
+              </div>
+              <div style={{ fontSize: 12.5, marginBottom: 8 }}>
+                Pace {analysis.scoring.playerPace.toFixed(1)} / {analysis.scoring.aiPace.toFixed(1)} pts per move · projected final ~
+                {analysis.scoring.projPlayer} / ~{analysis.scoring.projAi}
+              </div>
+              <TwoCol>
+                <div>
+                  <Faint>Your best scoring moves</Faint>
+                  {analysis.scoring.playerMoves.map((m) => (
+                    <Row key={m.cell}>
+                      <span style={{ fontVariantNumeric: "tabular-nums", fontWeight: 600, width: 34 }}>{cellLabel(m.cell, n)}</span>
+                      <span style={{ color: COLORS.accent, fontSize: 12 }}>+{m.delta}</span>
+                    </Row>
+                  ))}
+                </div>
+                <div>
+                  <Faint>
+                    <Shield size={11} style={{ verticalAlign: -2, marginRight: 3 }} />
+                    AI's scoring threats
+                  </Faint>
+                  {analysis.scoring.aiThreats.map((m) => (
+                    <Row key={m.cell}>
+                      <span style={{ fontVariantNumeric: "tabular-nums", fontWeight: 600, width: 34 }}>{cellLabel(m.cell, n)}</span>
+                      <span style={{ color: COLORS.alert, fontSize: 12 }}>+{m.delta}</span>
+                    </Row>
+                  ))}
+                </div>
+              </TwoCol>
+            </Section>
+          )}
+
+          <Section title="Search">
+            <div style={{ fontSize: 11.5, color: COLORS.textMuted, display: "flex", flexWrap: "wrap", gap: "4px 12px" }}>
+              <span>{analysis.mcts.simulations.toLocaleString()} simulations</span>
+              <span>{analysis.mcts.elapsedMs}ms</span>
+              <span>β {analysis.mcts.raveBeta.toFixed(2)}</span>
+              <span>{Math.round(analysis.mcts.totalVisits).toLocaleString()} tree visits</span>
+            </div>
+          </Section>
+
+          <Section title="Auto-peek duration">
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <input
+                type="number"
+                min={200}
+                max={60000}
+                step={100}
+                value={peekDurationMs}
+                onChange={(e) => setPeekDurationMs(Math.max(200, Math.min(60000, Number(e.target.value) || 200)))}
+                style={{
+                  width: 90,
+                  padding: "6px 8px",
+                  borderRadius: 6,
+                  border: `1px solid ${COLORS.border}`,
+                  background: COLORS.panelAlt,
+                  color: COLORS.text,
+                  fontSize: 12.5,
+                  fontVariantNumeric: "tabular-nums",
+                }}
+              />
+              <span style={{ fontSize: 11.5, color: COLORS.textFaint }}>ms before this panel auto-hides after a move</span>
+            </div>
+          </Section>
+        </div>
+      )}
+    </div>
+  );
+}
+function Section({ title, children }) {
+  return (
+    <div style={{ marginBottom: 12 }}>
+      <div style={{ fontSize: 10.5, letterSpacing: 0.4, color: COLORS.textFaint, marginBottom: 5, textTransform: "uppercase" }}>{title}</div>
+      {children}
+    </div>
+  );
+}
+function TwoCol({ children }) {
+  return <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>{children}</div>;
+}
+function Row({ children }) {
+  return <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "3px 0" }}>{children}</div>;
+}
+function Faint({ children }) {
+  return <div style={{ fontSize: 11.5, color: COLORS.textFaint, marginBottom: 3 }}>{children}</div>;
+}
+function ThreatList({ label, counts }) {
+  const entries = Object.entries(counts).filter(([, v]) => v > 0);
+  return (
+    <div>
+      <Faint>{label}</Faint>
+      {entries.length === 0 && <div style={{ fontSize: 11.5, color: COLORS.textFaint }}>None</div>}
+      {entries.map(([k, v]) => (
+        <div key={k} style={{ fontSize: 11.5, color: COLORS.text, display: "flex", justifyContent: "space-between" }}>
+          <span>{k.replace(/_/g, " ").toLowerCase()}</span>
+          <span style={{ fontVariantNumeric: "tabular-nums" }}>{v}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function SettingsPanel({ open, onClose, n, setN, winLen, setWinLen, mode, setMode, firstPlayer, setFirstPlayer, simulations, setSimulations, timeLimitMs, setTimeLimitMs, onTrain, training, trainResult, raveVisits }) {
+  if (!open) return null;
+  return (
+    <div
+      style={{ position: "absolute", inset: 0, background: "rgba(0,0,0,0.45)", zIndex: 20, display: "flex", justifyContent: "flex-end" }}
+      onClick={onClose}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        style={{ width: "min(360px, 92vw)", height: "100%", background: COLORS.panel, borderLeft: `1px solid ${COLORS.border}`, padding: 18, overflowY: "auto" }}
+      >
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+          <span style={{ fontSize: 15, fontWeight: 600 }}>Settings</span>
+          <button onClick={onClose} aria-label="Close settings" style={{ background: "none", border: "none", color: COLORS.textMuted, cursor: "pointer", minWidth: 40, minHeight: 40 }}>
+            <X size={18} />
+          </button>
+        </div>
+
+        <SettingRow label="Mode">
+          <div style={{ display: "flex", gap: 6 }}>
+            {[
+              ["classic", "Classic"],
+              ["scoring", "Score Attack"],
+            ].map(([val, lab]) => (
+              <button
+                key={val}
+                onClick={() => setMode(val)}
+                style={{
+                  flex: 1,
+                  padding: "8px 0",
+                  minHeight: 40,
+                  borderRadius: 8,
+                  border: `1px solid ${mode === val ? COLORS.accent : COLORS.border}`,
+                  background: mode === val ? COLORS.accent : COLORS.panelAlt,
+                  color: "#fff",
+                  fontSize: 13,
+                  cursor: "pointer",
+                }}
+              >
+                {lab}
+              </button>
+            ))}
+          </div>
+          <Faint>{mode === "classic" ? `First to connect ${winLen} wins.` : "Plays to a full board; most points wins."}</Faint>
+        </SettingRow>
+
+        <SettingRow label={`Board size — ${n}×${n}`}>
+          <input type="range" min={5} max={15} step={2} value={n} onChange={(e) => setN(Number(e.target.value))} style={{ width: "100%" }} />
+        </SettingRow>
+
+        {mode === "classic" && (
+          <SettingRow label={`Win length — ${winLen}`}>
+            <input type="range" min={3} max={n} step={1} value={winLen} onChange={(e) => setWinLen(Number(e.target.value))} style={{ width: "100%" }} />
+          </SettingRow>
+        )}
+
+        <SettingRow label="Who plays first">
+          <div style={{ display: "flex", gap: 6 }}>
+            {[
+              [1, "You"],
+              [2, "AI"],
+            ].map(([val, lab]) => (
+              <button
+                key={val}
+                onClick={() => setFirstPlayer(val)}
+                style={{
+                  flex: 1,
+                  padding: "8px 0",
+                  minHeight: 40,
+                  borderRadius: 8,
+                  border: `1px solid ${firstPlayer === val ? COLORS.accent : COLORS.border}`,
+                  background: firstPlayer === val ? COLORS.accent : COLORS.panelAlt,
+                  color: "#fff",
+                  fontSize: 13,
+                  cursor: "pointer",
+                }}
+              >
+                {lab}
+              </button>
+            ))}
+          </div>
+        </SettingRow>
+
+        <SettingRow label={`Thinking budget — ${simulations.toLocaleString()} sims, ${(timeLimitMs / 1000).toFixed(1)}s cap`}>
+          <input type="range" min={200} max={6000} step={100} value={simulations} onChange={(e) => setSimulations(Number(e.target.value))} style={{ width: "100%" }} />
+          <input type="range" min={300} max={3000} step={100} value={timeLimitMs} onChange={(e) => setTimeLimitMs(Number(e.target.value))} style={{ width: "100%", marginTop: 6 }} />
+        </SettingRow>
+
+        <SettingRow label="Quick train">
+          <Faint>Runs fast self-play games (no tree search) to seed this exact board size + mode before you play.</Faint>
+          <div style={{ display: "flex", gap: 8, marginTop: 4 }}>
+            <button
+              onClick={() => onTrain(200)}
+              disabled={training}
+              style={{ flex: 1, padding: "9px 0", minHeight: 40, borderRadius: 8, border: `1px solid ${COLORS.border}`, background: COLORS.panelAlt, color: "#fff", cursor: training ? "default" : "pointer", opacity: training ? 0.6 : 1, fontSize: 13 }}
+            >
+              {training ? "Training…" : "Train 200 games"}
+            </button>
+          </div>
+          {trainResult && (
+            <Faint>
+              Last run: P1 {trainResult.p1} · P2 {trainResult.p2} · draw {trainResult.draw}
+            </Faint>
+          )}
+          <Faint>Table for this config: {Math.round(raveVisits).toLocaleString()} accumulated visits</Faint>
+        </SettingRow>
+
+        <SettingRow label="About this AI">
+          <Faint>
+            MCTS + RAVE search, a rule-based threat classifier for tactics (no missed forced wins/blocks, fork detection), and a
+            persistent per-board-size learning table saved in this browser. No neural network.
+          </Faint>
+        </SettingRow>
+      </div>
+    </div>
+  );
+}
+function SettingRow({ label, children }) {
+  return (
+    <div style={{ marginBottom: 18 }}>
+      <div style={{ fontSize: 12.5, color: COLORS.textMuted, marginBottom: 6 }}>{label}</div>
+      {children}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Main component
+// ---------------------------------------------------------------------------
+export default function GomokuGame() {
+  const [n, setN] = useState(9);
+  const [winLen, setWinLen] = useState(5);
+  const [mode, setMode] = useState("classic");
+  const [firstPlayer, setFirstPlayer] = useState(1);
+  const [simulations, setSimulations] = useState(1500);
+  const [timeLimitMs, setTimeLimitMs] = useState(1200);
+  const [peekDurationMs, setPeekDurationMs] = useState(2200);
+
+  const [game, setGame] = useState(() => freshGame(9, 1));
+  const [analysis, setAnalysis] = useState(null);
+  const [thinking, setThinking] = useState(false);
+  const [raveReady, setRaveReady] = useState(false);
+  const [raveVisits, setRaveVisits] = useState(0);
+  const raveRef = useRef(null);
+  const raveKeyRef = useRef("");
+
+  const [training, setTraining] = useState(false);
+  const [trainResult, setTrainResult] = useState(null);
+
+  const [showSettings, setShowSettings] = useState(false);
+  const [hovered, setHovered] = useState(false);
+  const [pinned, setPinned] = useState(false);
+  const [autoPeek, setAutoPeek] = useState(false);
+  const mountedRef = useRef(false);
+  const peekTimerRef = useRef(null);
+  const aiKickoffRef = useRef(null);
+  // Bumped on every game reset. Lets an in-flight AI computation started
+  // against the OLD board detect, when it finishes, that the game has since
+  // been reset (e.g. user hit "New Game" mid-think) and discard its result
+  // instead of applying a stale move to the fresh board.
+  const gameGenRef = useRef(0);
+
+  const wrapRef = useRef(null);
+  const [boardPx, setBoardPx] = useState(320);
+
+  // ---- responsive square board sizing (JS-computed, applied to the outer
+  // wrapper, never CSS aspect-ratio — see rebuild-spec Part F.1/F.2) ----
+  useEffect(() => {
+    function recompute() {
+      const el = wrapRef.current;
+      if (!el) return;
+      const rect = el.getBoundingClientRect();
+      const evalBarSpace = 48;
+      const target = Math.max(
+        180,
+        Math.min(rect.width - evalBarSpace, rect.height, window.innerWidth * 0.85, window.innerHeight * 0.72)
+      );
+      setBoardPx(Math.floor(target));
+    }
+    recompute();
+    const ro = new ResizeObserver(recompute);
+    if (wrapRef.current) ro.observe(wrapRef.current);
+    window.addEventListener("resize", recompute);
+    return () => {
+      ro.disconnect();
+      window.removeEventListener("resize", recompute);
+    };
+  }, []);
+
+  // ---- load / decay GlobalRAVE whenever board size or mode changes ----
+  // Debounced: dragging the board-size slider changes `n` on every tick,
+  // and each change would otherwise fire a window.storage.get() call —
+  // wasteful (and the storage API is explicitly rate-limited). Wait for
+  // the value to settle before actually loading.
+  useEffect(() => {
+    let cancelled = false;
+    setRaveReady(false);
+    const key = `rave_${n}_${mode}`;
+    const debounce = setTimeout(() => {
+      (async () => {
+        let gr = null;
+        try {
+          const res = await window.storage.get(key);
+          if (res && res.value) gr = GlobalRAVE.fromJSON(JSON.parse(res.value));
+        } catch (e) {
+          gr = null;
+        }
+        if (!gr) gr = new GlobalRAVE(n);
+        else gr.decay(0.9); // real new game/config switch -> decay old knowledge
+        if (!cancelled) {
+          raveRef.current = gr;
+          raveKeyRef.current = key;
+          setRaveVisits(gr.totalVisits());
+          setRaveReady(true);
+        }
+      })();
+    }, 300);
+    return () => {
+      cancelled = true;
+      clearTimeout(debounce);
+    };
+  }, [n, mode]);
+
+  // ---- reset the game whenever size/mode/winLen/firstPlayer change ----
+  useEffect(() => {
+    gameGenRef.current += 1;
+    setGame(freshGame(n, firstPlayer));
+    setAnalysis(null);
+    setThinking(false);
+    setHovered(false);
+    setPinned(false);
+    setAutoPeek(false);
+  }, [n, mode, winLen, firstPlayer]);
+
+  const saveRave = useCallback(() => {
+    if (!raveRef.current) return;
+    const key = raveKeyRef.current;
+    const payload = JSON.stringify(raveRef.current.toJSON());
+    window.storage.set(key, payload).catch(() => {});
+  }, []);
+
+  const applyAiMove = useCallback(
+    (res, boardBefore, scoresBefore) => {
+      setGame((prev) => {
+        if (prev.status !== "playing" || prev.board[res.move] !== 0) return prev;
+        const nb = prev.board.slice();
+        nb[res.move] = 2;
+        const row = Math.floor(res.move / n),
+          col = res.move % n;
+        let status = "playing",
+          winner = 0;
+        let scores = prev.scores;
+        if (mode === "classic") {
+          if (checkWinAt(nb, n, winLen, row, col, 2)) {
+            status = "won";
+            winner = 2;
+          } else if (legalMoves(nb).length === 0) {
+            status = "draw";
+          }
+        } else {
+          const delta = scoreMoveDelta(prev.board, n, row, col, 2);
+          scores = { ...prev.scores, 2: prev.scores[2] + delta };
+          if (legalMoves(nb).length === 0) {
+            status = scores[1] === scores[2] ? "draw" : "won";
+            winner = scores[1] > scores[2] ? 1 : 2;
+          }
+        }
+        return {
+          board: nb,
+          player: 1,
+          status,
+          winner,
+          scores,
+          moveHistory: [...prev.moveHistory, { cell: res.move, player: 2 }],
+        };
+      });
+      // Analysis is built from the EXACT board/scores the search ran
+      // against (passed in explicitly), not read back from closure state —
+      // avoids any dependence on `game` not having moved on in the
+      // meantime.
+      setAnalysis(buildAnalysis(boardBefore, n, winLen, mode, res, scoresBefore));
+      setThinking(false);
+      setAutoPeek(true);
+      saveRave();
+    },
+    [n, winLen, mode, saveRave]
+  );
+
+  // ---- trigger AI turn ----
+  useEffect(() => {
+    if (game.status !== "playing" || game.player !== 2 || !raveReady || thinking) return;
+    setThinking(true);
+    const boardSnapshot = game.board.slice();
+    const scoresSnapshot = game.scores;
+    const myGen = gameGenRef.current;
+    const t = setTimeout(() => {
+      if (myGen !== gameGenRef.current) {
+        // Game was reset (e.g. "New Game" clicked) while this computation
+        // was in flight — discard the result instead of applying a move
+        // computed for a board that no longer exists.
+        return;
+      }
+      const res = runMCTS({
+        board: boardSnapshot,
+        n,
+        winLen,
+        mode,
+        aiPlayer: 2,
+        simulations,
+        timeLimitMs,
+        globalRave: raveRef.current,
+        seed: (Date.now() ^ (boardSnapshot.length * 2654435761)) >>> 0,
+      });
+      if (myGen !== gameGenRef.current) return; // re-check: reset could have happened during the (blocking) search too
+      setRaveVisits(raveRef.current.totalVisits());
+      applyAiMoveRef.current(res, boardSnapshot, scoresSnapshot);
+    }, 40);
+    aiKickoffRef.current = t;
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [game.status, game.player, game.board, raveReady, n, winLen, mode, simulations, timeLimitMs]);
+
+  const applyAiMoveRef = useRef(applyAiMove);
+  applyAiMoveRef.current = applyAiMove;
+
+  function handleCellClick(cell) {
+    if (game.status !== "playing" || game.player !== 1 || game.board[cell] !== 0 || thinking) return;
+    setGame((prev) => {
+      const nb = prev.board.slice();
+      nb[cell] = 1;
+      const row = Math.floor(cell / n),
+        col = cell % n;
+      let status = "playing",
+        winner = 0;
+      let scores = prev.scores;
+      if (mode === "classic") {
+        if (checkWinAt(nb, n, winLen, row, col, 1)) {
+          status = "won";
+          winner = 1;
+        } else if (legalMoves(nb).length === 0) {
+          status = "draw";
+        }
+      } else {
+        const delta = scoreMoveDelta(prev.board, n, row, col, 1);
+        scores = { ...prev.scores, 1: prev.scores[1] + delta };
+        if (legalMoves(nb).length === 0) {
+          status = scores[1] === scores[2] ? "draw" : "won";
+          winner = scores[1] > scores[2] ? 1 : 2;
+        }
+      }
+      return { board: nb, player: 2, status, winner, scores, moveHistory: [...prev.moveHistory, { cell, player: 1 }] };
+    });
+    setHovered(false);
+    setPinned(false);
+    setAutoPeek(false);
+  }
+
+  function newGame() {
+    gameGenRef.current += 1;
+    setGame(freshGame(n, firstPlayer));
+    setAnalysis(null);
+    setThinking(false);
+    setHovered(false);
+    setPinned(false);
+    setAutoPeek(false);
+    if (aiKickoffRef.current) clearTimeout(aiKickoffRef.current);
+  }
+
+  async function runTrain(count) {
+    if (!raveRef.current || training) return;
+    setTraining(true);
+    await new Promise((r) => setTimeout(r, 20));
+    const result = trainGames(n, winLen, mode, count, raveRef.current, Date.now() & 0xffff);
+    setTrainResult(result);
+    setRaveVisits(raveRef.current.totalVisits());
+    saveRave();
+    setTraining(false);
+  }
+
+  // ---- auto-peek state machine ----
+  useEffect(() => {
+    if (!mountedRef.current) {
+      mountedRef.current = true;
+      return;
+    }
+    if (!autoPeek) return;
+    if (peekTimerRef.current) clearTimeout(peekTimerRef.current);
+    peekTimerRef.current = setTimeout(() => setAutoPeek(false), peekDurationMs);
+    return () => clearTimeout(peekTimerRef.current);
+  }, [autoPeek, peekDurationMs]);
+
+  const expanded = hovered || pinned || autoPeek;
+
+  function onPanelEnter() {
+    setHovered(true);
+  }
+  function onPanelLeave() {
+    setHovered(false);
+    setPinned(false);
+    if (peekTimerRef.current) clearTimeout(peekTimerRef.current);
+    setAutoPeek(false);
+  }
+  function onPanelTap() {
+    if (hovered) return;
+    setPinned((p) => {
+      const next = !p;
+      if (next && peekTimerRef.current) clearTimeout(peekTimerRef.current);
+      return next;
+    });
+  }
+
+  const statusText =
+    game.status === "won"
+      ? game.winner === 1
+        ? "You won"
+        : "AI won"
+      : game.status === "draw"
+      ? mode === "scoring"
+        ? game.scores[1] === game.scores[2]
+          ? "Tied"
+          : game.scores[1] > game.scores[2]
+          ? "You won on points"
+          : "AI won on points"
+        : "Draw"
+      : thinking
+      ? "AI thinking…"
+      : "Your turn";
+
+  return (
+    <div style={{ background: COLORS.app, color: COLORS.text, fontFamily: 'ui-sans-serif, -apple-system, "Segoe UI", Roboto, Arial, sans-serif', borderRadius: 16, minHeight: 560, display: "flex", flexDirection: "column", overflow: "hidden" }}>
+      <style>{`
+        @keyframes pulseDot { 0%,100%{opacity:.35} 50%{opacity:1} }
+        .ibtn-label { display: none; }
+        @media (min-width: 520px) { .ibtn-label { display: inline; } }
+        input[type=range] { accent-color: ${COLORS.accent}; }
+      `}</style>
+
+      {/* Toolbar */}
+      <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "10px 12px", borderBottom: `1px solid ${COLORS.border}`, flexWrap: "wrap" }}>
+        <span style={{ fontWeight: 700, fontSize: 15, marginRight: 4 }}>N-in-a-Row</span>
+        <div style={{ display: "flex", gap: 4, background: COLORS.panelAlt, padding: 3, borderRadius: 8 }}>
+          {[
+            ["classic", "Classic"],
+            ["scoring", "Score Attack"],
+          ].map(([val, lab]) => (
+            <button
+              key={val}
+              onClick={() => setMode(val)}
+              style={{ padding: "6px 10px", minHeight: 34, borderRadius: 6, border: "none", background: mode === val ? COLORS.accent : "transparent", color: "#fff", fontSize: 12.5, cursor: "pointer" }}
+            >
+              {lab}
+            </button>
+          ))}
+        </div>
+        {mode === "scoring" && (
+          <span style={{ fontSize: 13, fontVariantNumeric: "tabular-nums", padding: "4px 10px", borderRadius: 999, background: COLORS.panelAlt, border: `1px solid ${COLORS.border}` }}>
+            You {game.scores[1]} : {game.scores[2]} AI
+          </span>
+        )}
+        <div style={{ flex: 1 }} />
+        <IconBtn onClick={newGame} title="New game" icon={<RotateCcw size={15} />} label="New game" />
+        <IconBtn onClick={() => runTrain(200)} title="Quick train (200 self-play games)" icon={<Zap size={15} />} label="Train" disabled={training} />
+        <IconBtn onClick={() => setShowSettings(true)} title="Settings" icon={<SettingsIcon size={15} />} label="Settings" />
+      </div>
+
+      {/* Status */}
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 8, padding: "6px 0", fontSize: 12.5, color: COLORS.textMuted, borderBottom: `1px solid ${COLORS.border}` }}>
+        <span style={{ width: 7, height: 7, borderRadius: "50%", background: game.status === "won" ? COLORS.accent : thinking ? COLORS.amber : COLORS.textFaint }} />
+        {statusText} · move {game.moveHistory.length}
+      </div>
+
+      {/* Board + eval bar, with analysis overlay */}
+      <div ref={wrapRef} style={{ flex: 1, position: "relative", display: "flex", alignItems: "center", justifyContent: "center", padding: 12, minHeight: 320 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          <Board n={n} board={game.board} onCellClick={handleCellClick} disabled={game.status !== "playing" || game.player !== 1 || thinking} lastMove={game.moveHistory.length ? game.moveHistory[game.moveHistory.length - 1].cell : -1} sizePx={boardPx} />
+          <EvalBar playerPct={analysis?.playerWinPct ?? 50} aiPct={analysis?.aiWinPct ?? 50} thinking={thinking} mode={mode} scores={game.scores} />
+        </div>
+        <AnalysisPanel analysis={analysis} n={n} mode={mode} expanded={expanded} onEnter={onPanelEnter} onLeave={onPanelLeave} onTap={onPanelTap} peekDurationMs={peekDurationMs} setPeekDurationMs={setPeekDurationMs} thinking={thinking} />
+        <SettingsPanel
+          open={showSettings}
+          onClose={() => setShowSettings(false)}
+          n={n}
+          setN={setN}
+          winLen={winLen}
+          setWinLen={setWinLen}
+          mode={mode}
+          setMode={setMode}
+          firstPlayer={firstPlayer}
+          setFirstPlayer={setFirstPlayer}
+          simulations={simulations}
+          setSimulations={setSimulations}
+          timeLimitMs={timeLimitMs}
+          setTimeLimitMs={setTimeLimitMs}
+          onTrain={runTrain}
+          training={training}
+          trainResult={trainResult}
+          raveVisits={raveVisits}
+        />
+      </div>
+
+      <div style={{ textAlign: "center", fontSize: 10.5, color: COLORS.textFaint, padding: "6px 0", borderTop: `1px solid ${COLORS.border}` }}>
+        MCTS + RAVE · Threat classifier · {Math.round(raveVisits).toLocaleString()} learned visits for {n}×{n} {mode}
+      </div>
+    </div>
+  );
+}

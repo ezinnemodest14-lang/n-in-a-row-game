@@ -1,0 +1,702 @@
+   701→        path.push(node);
+   702→        curPlayer = curPlayer === 1 ? 2 : 1;
+   703→      }
+   704→    }
+   705→
+   706→    // ---- Simulation ----
+   707→    let reward1; // outcome from PLAYER 1's perspective, in [0,1]
+   708→    let playoutMoves = [];
+   709→    if (terminal) {
+   710→      reward1 = terminalWinner === 1 ? 1 : 0;
+   711→    } else if (legalMoves(state).length === 0 && mode === "classic") {
+   712→      reward1 = 0.5;
+   713→    } else {
+   714→      const pl = runPlayout(state, n, winLen, mode, curPlayer, globalRave, rng, n * n + 2);
+   715→      playoutMoves = pl.played;
+   716→      if (mode === "classic") {
+   717→        reward1 = pl.winner === 0 ? 0.5 : pl.winner === 1 ? 1 : 0;
+   718→      } else {
+   719→        reward1 = 1 / (1 + Math.exp(-pl.scoreDiff / Math.max(4, n)));
+   720→      }
+   721→    }
+   722→    for (const mv of playoutMoves) {
+   723→      const r = mv.player === 1 ? reward1 : 1 - reward1;
+   724→      globalRave.update(mv.player, mv.cell, r);
+   725→    }
+   726→
+   727→    // ---- Backprop ----
+   728→    // Root always tracks value FOR aiPlayer (what "rootWinRate" reports).
+   729→    path[0].visits += 1;
+   730→    path[0].wins += aiPlayer === 1 ? reward1 : 1 - reward1;
+   731→    // Every descendant tracks value for whoever MOVED to reach it, i.e.
+   732→    // its parent's `.player` (the mover at the parent, which is exactly
+   733→    // who selection compares children on behalf of).
+   734→    for (let i = 1; i < path.length; i++) {
+   735→      const moverToReachThis = path[i - 1].player;
+   736→      path[i].visits += 1;
+   737→      path[i].wins += moverToReachThis === 1 ? reward1 : 1 - reward1;
+   738→    }
+   739→  }
+   740→
+   741→  let bestCell = null,
+   742→    bestVisits = -1;
+   743→  const rootChildren = [];
+   744→  for (const [cell, child] of root.children) {
+   745→    if (board[cell] !== 0) continue;
+   746→    rootChildren.push({ cell, visits: child.visits, winRate: child.visits > 0 ? child.wins / child.visits : 0 });
+   747→    if (child.visits > bestVisits) {
+   748→      bestVisits = child.visits;
+   749→      bestCell = cell;
+   750→    }
+   751→  }
+   752→  rootChildren.sort((a, b) => b.visits - a.visits);
+   753→
+   754→  const override = tacticalMove(board, n, winLen, aiPlayer, humanPlayer);
+   755→  if (override && board[override.cell] === 0) bestCell = override.cell;
+   756→  if (bestCell === null || board[bestCell] !== 0) {
+   757→    const lm = legalMoves(board);
+   758→    bestCell = lm[Math.floor(rng() * lm.length)];
+   759→  }
+   760→
+   761→  const rootWinRate = root.visits > 0 ? root.wins / root.visits : 0.5;
+   762→  return {
+   763→    move: bestCell,
+   764→    reason: override ? override.reason : "search",
+   765→    simulations: sims,
+   766→    elapsedMs: Date.now() - start,
+   767→    rootWinRate,
+   768→    raveBeta: raveBeta(root.visits),
+   769→    topChildren: rootChildren.slice(0, 6),
+   770→    totalVisits: root.visits,
+   771→  };
+   772→}
+   773→
+   774→// ============================================================================
+   775→// REACT UI LAYER
+   776→// ============================================================================
+   777→const COLORS = {
+   778→  app: "#14171c",
+   779→  panel: "#1b2028",
+   780→  panelAlt: "#212832",
+   781→  border: "#2b323d",
+   782→  text: "#e9ecf1",
+   783→  textMuted: "#8b95a5",
+   784→  textFaint: "#5b6472",
+   785→  boardFrame: "#4a3626",
+   786→  cell: "#d9ab5f",
+   787→  cellLine: "#5f4a30",
+   788→  stone1: "#f2ead8",
+   789→  stone1Ring: "#c2b190",
+   790→  stone2: "#20242a",
+   791→  accent: "#3f8f5f",
+   792→  accentHover: "#4aa26b",
+   793→  alert: "#c0483f",
+   794→  amber: "#c98a3b",
+   795→};
+   796→
+   797→const CAT_COLOR = {
+   798→  0: COLORS.textFaint,
+   799→  1: COLORS.textFaint,
+   800→  2: COLORS.textFaint,
+   801→  3: COLORS.textMuted,
+   802→  4: COLORS.amber,
+   803→  5: COLORS.amber,
+   804→  6: COLORS.alert,
+   805→  7: COLORS.alert,
+   806→  8: COLORS.alert,
+   807→};
+   808→
+   809→function colLabel(c) {
+   810→  return String.fromCharCode(65 + c);
+   811→}
+   812→function rowLabel(r, n) {
+   813→  return n - r;
+   814→}
+   815→function cellLabel(cell, n) {
+   816→  return colLabel(cell % n) + rowLabel(Math.floor(cell / n), n);
+   817→}
+   818→
+   819→function freshGame(n, firstPlayer) {
+   820→  return {
+   821→    board: emptyBoard(n),
+   822→    player: firstPlayer,
+   823→    status: "playing",
+   824→    winner: 0,
+   825→    moveHistory: [],
+   826→    scores: { 1: 0, 2: 0 },
+   827→  };
+   828→}
+   829→
+   830→const REASON_TEXT = {
+   831→  win: "Completes a winning line.",
+   832→  "block-win": "Blocking your winning line — one more move and you'd have won.",
+   833→  "open-four": "Creates an open four — unstoppable next turn from either end.",
+   834→  "block-four": "Blocking your simple four before it could complete.",
+   835→  "block-open-four": "Trying to slow an open four — it likely can't be fully stopped now.",
+   836→  fork: "Creates a fork — two live threats at once, so only one can be blocked.",
+   837→  "block-open-three": "Blocking your open three before it becomes an open four.",
+   838→  search: "No forcing move available — playing the strongest position the search found.",
+   839→};
+   840→
+   841→function countThreats(board, n, player, winLen) {
+   842→  const keys = ["SIMPLE_THREE", "BROKEN_THREE", "OPEN_THREE", "SIMPLE_FOUR", "OPEN_FOUR"];
+   843→  const counts = Object.fromEntries(keys.map((k) => [k, 0]));
+   844→  const cells = classifyBoard(board, n, player, winLen);
+   845→  for (const [, c] of cells) {
+   846→    for (const k of keys) if (CAT[k] === c.category) counts[k]++;
+   847→  }
+   848→  return counts;
+   849→}
+   850→
+   851→function buildScoringAnalysis(board, n, scores) {
+   852→  const remaining = legalMoves(board).length;
+   853→  const filled = n * n - remaining;
+   854→  const fillPct = Math.round((filled / (n * n)) * 100);
+   855→  const halfFilled = Math.max(1, filled / 2);
+   856→  const playerPace = scores[1] / halfFilled;
+   857→  const aiPace = scores[2] / halfFilled;
+   858→  const halfRemaining = remaining / 2;
+   859→  const projPlayer = Math.round(scores[1] + playerPace * halfRemaining);
+   860→  const projAi = Math.round(scores[2] + aiPace * halfRemaining);
+   861→
+   862→  const playerMoves = legalMoves(board)
+   863→    .map((cell) => {
+   864→      const row = Math.floor(cell / n),
+   865→        col = cell % n;
+   866→      return { cell, delta: scoreMoveDelta(board, n, row, col, 1) };
+   867→    })
+   868→    .filter((m) => m.delta > 0)
+   869→    .sort((a, b) => b.delta - a.delta)
+   870→    .slice(0, 5);
+   871→
+   872→  const aiThreats = legalMoves(board)
+   873→    .map((cell) => {
+   874→      const row = Math.floor(cell / n),
+   875→        col = cell % n;
+   876→      return { cell, delta: scoreMoveDelta(board, n, row, col, 2) };
+   877→    })
+   878→    .filter((m) => m.delta > 0)
+   879→    .sort((a, b) => b.delta - a.delta)
+   880→    .slice(0, 5);
+   881→
+   882→  return { remaining, fillPct, playerPace, aiPace, projPlayer, projAi, playerMoves, aiThreats };
+   883→}
+   884→
+   885→function buildAnalysis(board, n, winLen, mode, mctsResult, scores) {
+   886→  const ev = evaluatePosition(board, n, winLen);
+   887→  const aiWinPctRaw = Math.round(mctsResult.rootWinRate * 100);
+   888→  const aiWinPct = Math.max(0, Math.min(100, aiWinPctRaw));
+   889→  const playerWinPct = 100 - aiWinPct; // derive, never round both independently (bug #17)
+   890→
+   891→  const humanCells = classifyBoard(board, n, 1, winLen);
+   892→  const humanOptions = [...humanCells.entries()]
+   893→    .filter(([, c]) => c.category > CAT.NONE)
+   894→    .sort((a, b) => b[1].score - a[1].score)
+   895→    .slice(0, 5)
+   896→    .map(([cell, c]) => ({ cell, category: c.category, isFork: c.isFork }));
+   897→
+   898→  const threats = { player: countThreats(board, n, 1, winLen), ai: countThreats(board, n, 2, winLen) };
+   899→
+   900→  return {
+   901→    eval: ev,
+   902→    playerWinPct,
+   903→    aiWinPct,
+   904→    aiReasonCell: mctsResult.move,
+   905→    aiReason: mctsResult.reason,
+   906→    humanOptions,
+   907→    aiConsidered: mctsResult.topChildren,
+   908→    threats,
+   909→    mcts: {
+   910→      simulations: mctsResult.simulations,
+   911→      elapsedMs: mctsResult.elapsedMs,
+   912→      raveBeta: mctsResult.raveBeta,
+   913→      totalVisits: mctsResult.totalVisits,
+   914→    },
+   915→    scoring: mode === "scoring" ? buildScoringAnalysis(board, n, scores) : null,
+   916→  };
+   917→}
+   918→
+   919→// ---------------------------------------------------------------------------
+   920→// Small building blocks
+   921→// ---------------------------------------------------------------------------
+   922→function IconBtn({ onClick, title, icon, label, active, disabled }) {
+   923→  return (
+   924→    <button
+   925→      onClick={onClick}
+   926→      title={title}
+   927→      aria-label={title}
+   928→      disabled={disabled}
+   929→      style={{
+   930→        display: "inline-flex",
+   931→        alignItems: "center",
+   932→        gap: 6,
+   933→        padding: "8px 12px",
+   934→        minHeight: 40,
+   935→        borderRadius: 8,
+   936→        background: active ? COLORS.accent : COLORS.panelAlt,
+   937→        color: active ? "#fff" : COLORS.text,
+   938→        border: `1px solid ${active ? COLORS.accent : COLORS.border}`,
+   939→        fontSize: 13.5,
+   940→        fontWeight: 500,
+   941→        cursor: disabled ? "default" : "pointer",
+   942→        opacity: disabled ? 0.5 : 1,
+   943→        whiteSpace: "nowrap",
+   944→      }}
+   945→    >
+   946→      {icon}
+   947→      <span className="ibtn-label">{label}</span>
+   948→    </button>
+   949→  );
+   950→}
+   951→
+   952→function EvalBar({ playerPct, aiPct, thinking, mode, scores }) {
+   953→  const playerFrac = mode === "scoring" ? (scores[1] + scores[2] > 0 ? scores[1] / (scores[1] + scores[2]) : 0.5) : playerPct / 100;
+   954→  return (
+   955→    <div style={{ width: 26, display: "flex", flexDirection: "column", alignItems: "center", opacity: thinking ? 0.35 : 1, transition: "opacity 160ms" }}>
+   956→      <div style={{ fontSize: 10.5, color: COLORS.textFaint, marginBottom: 4, fontVariantNumeric: "tabular-nums" }}>
+   957→        {mode === "scoring" ? scores[2] : Math.round(100 - playerFrac * 100) + "%"}
+   958→      </div>
+   959→      <div style={{ flex: 1, width: 16, borderRadius: 8, overflow: "hidden", background: COLORS.stone2, display: "flex", flexDirection: "column-reverse", position: "relative" }}>
+   960→        <div style={{ height: `${Math.max(2, Math.min(98, playerFrac * 100))}%`, background: COLORS.accent, transition: "height 260ms ease" }} />
+   961→        {thinking && (
+   962→          <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center" }}>
+   963→            <div style={{ width: 8, height: 8, borderRadius: "50%", background: "#fff", animation: "pulseDot 1s infinite" }} />
+   964→          </div>
+   965→        )}
+   966→      </div>
+   967→      <div style={{ fontSize: 10.5, color: COLORS.textFaint, marginTop: 4, fontVariantNumeric: "tabular-nums" }}>
+   968→        {mode === "scoring" ? scores[1] : Math.round(playerFrac * 100) + "%"}
+   969→      </div>
+   970→    </div>
+   971→  );
+   972→}
+   973→
+   974→function Board({ n, board, onCellClick, disabled, lastMove, sizePx }) {
+   975→  const cellPx = sizePx / n;
+   976→  return (
+   977→    <div style={{ background: COLORS.boardFrame, borderRadius: 10, padding: Math.max(6, cellPx * 0.18), display: "inline-block" }}>
+   978→      <div style={{ display: "flex" }}>
+   979→        <div style={{ display: "flex", flexDirection: "column", marginRight: 4 }}>
+   980→          {Array.from({ length: n }, (_, r) => (
+   981→            <div key={r} style={{ height: cellPx, display: "flex", alignItems: "center", justifyContent: "flex-end", fontSize: Math.max(9, cellPx * 0.28), color: COLORS.text, opacity: 0.65, width: 16, fontVariantNumeric: "tabular-nums" }}>
+   982→              {rowLabel(r, n)}
+   983→            </div>
+   984→          ))}
+   985→        </div>
+   986→        <div>
+   987→          <div
+   988→            style={{
+   989→              display: "grid",
+   990→              gridTemplateColumns: `repeat(${n}, ${cellPx}px)`,
+   991→              gridTemplateRows: `repeat(${n}, ${cellPx}px)`,
+   992→              gap: 1,
+   993→              background: COLORS.cellLine,
+   994→            }}
+   995→          >
+   996→            {Array.from(board).map((val, i) => {
+   997→              const isLast = lastMove === i;
+   998→              return (
+   999→                <button
+  1000→                  key={i}
+  1001→                  onClick={() => onCellClick(i)}
+  1002→                  disabled={disabled || val !== 0}
+  1003→                  style={{
+  1004→                    width: cellPx,
+  1005→                    height: cellPx,
+  1006→                    background: COLORS.cell,
+  1007→                    border: "none",
+  1008→                    padding: 0,
+  1009→                    display: "flex",
+  1010→                    alignItems: "center",
+  1011→                    justifyContent: "center",
+  1012→                    cursor: disabled || val !== 0 ? "default" : "pointer",
+  1013→                  }}
+  1014→                >
+  1015→                  {val !== 0 && (
+  1016→                    <div
+  1017→                      style={{
+  1018→                        width: cellPx - Math.max(4, cellPx * 0.16),
+  1019→                        height: cellPx - Math.max(4, cellPx * 0.16),
+  1020→                        borderRadius: "50%",
+  1021→                        background: val === 1 ? COLORS.stone1 : COLORS.stone2,
+  1022→                        boxShadow:
+  1023→                          val === 1
+  1024→                            ? `inset 0 0 0 1px ${COLORS.stone1Ring}, 0 1px 2px rgba(0,0,0,.35)${isLast ? `, 0 0 0 2px ${COLORS.accent}` : ""}`
+  1025→                            : `0 1px 2px rgba(0,0,0,.5)${isLast ? `, 0 0 0 2px ${COLORS.accent}` : ""}`,
+  1026→                    }}
+  1027→                  />
+  1028→                  )}
+  1029→                </button>
+  1030→              );
+  1031→            })}
+  1032→          </div>
+  1033→          <div style={{ display: "grid", gridTemplateColumns: `repeat(${n}, ${cellPx}px)`, marginTop: 4 }}>
+  1034→            {Array.from({ length: n }, (_, c) => (
+  1035→              <div key={c} style={{ textAlign: "center", fontSize: Math.max(9, cellPx * 0.28), color: COLORS.text, opacity: 0.65, fontVariantNumeric: "tabular-nums" }}>
+  1036→                {colLabel(c)}
+  1037→              </div>
+  1038→            ))}
+  1039→          </div>
+  1040→        </div>
+  1041→      </div>
+  1042→    </div>
+  1043→  );
+  1044→}
+  1045→
+  1046→function CategoryChip({ category, isFork }) {
+  1047→  return (
+  1048→    <span
+  1049→      style={{
+  1050→        fontSize: 11,
+  1051→        padding: "2px 7px",
+  1052→        borderRadius: 999,
+  1053→        color: "#fff",
+  1054→        background: CAT_COLOR[category],
+  1055→        whiteSpace: "nowrap",
+  1056→      }}
+  1057→    >
+  1058→      {isFork ? "Fork" : CAT_NAME[category]}
+  1059→    </span>
+  1060→  );
+  1061→}
+  1062→
+  1063→function AnalysisPanel({ analysis, n, mode, expanded, onEnter, onLeave, onTap, peekDurationMs, setPeekDurationMs, thinking }) {
+  1064→  if (!analysis) {
+  1065→    return (
+  1066→      <div
+  1067→        onMouseEnter={onEnter}
+  1068→        onMouseLeave={onLeave}
+  1069→        onClick={onTap}
+  1070→        style={{
+  1071→          position: "absolute",
+  1072→          left: 0,
+  1073→          right: 0,
+  1074→          bottom: 0,
+  1075→          textAlign: "center",
+  1076→          padding: "8px 0",
+  1077→          fontSize: 12,
+  1078→          color: COLORS.textFaint,
+  1079→          cursor: "pointer",
+  1080→        }}
+  1081→      >
+  1082→        Play a move to see analysis
+  1083→      </div>
+  1084→    );
+  1085→  }
+  1086→  const ev = analysis.eval;
+  1087→  const evColor = ev.raw > 8 ? COLORS.accent : ev.raw < -8 ? COLORS.alert : COLORS.textMuted;
+  1088→  const evLabel = Math.abs(ev.raw) < 5 ? "Even" : ev.raw > 0 ? (ev.raw > 20 ? "Winning" : "Slight edge") : ev.raw < -20 ? "Losing" : "Slight edge (AI)";
+  1089→
+  1090→  return (
+  1091→    <div style={{ position: "absolute", left: 0, right: 0, bottom: 0 }}>
+  1092→      {!expanded && (
+  1093→        <div
+  1094→          onMouseEnter={onEnter}
+  1095→          onClick={onTap}
+  1096→          style={{
+  1097→            display: "flex",
+  1098→            alignItems: "center",
+  1099→            justifyContent: "center",
+  1100→            gap: 6,
+  1101→            padding: "7px 0",
+  1102→            fontSize: 12.5,
+  1103→            color: COLORS.text,
+  1104→            background: `linear-gradient(0deg, ${COLORS.panel}ee, transparent)`,
+  1105→            cursor: "pointer",
+  1106→          }}
+  1107→        >
+  1108→          <span style={{ width: 7, height: 7, borderRadius: "50%", background: evColor }} />
+  1109→          Analysis {ev.display > 0 ? "+" : ""}
+  1110→          {ev.display}
+  1111→          <ChevronUp size={13} />
+  1112→        </div>
+  1113→      )}
+  1114→      {expanded && (
+  1115→        <div
+  1116→          onMouseLeave={onLeave}
+  1117→          style={{
+  1118→            background: "rgba(27,32,40,0.92)",
+  1119→            backdropFilter: "blur(14px)",
+  1120→            borderTop: `1px solid ${COLORS.border}`,
+  1121→            borderRadius: "12px 12px 0 0",
+  1122→            maxHeight: "72%",
+  1123→            overflowY: "auto",
+  1124→            padding: 14,
+  1125→          }}
+  1126→        >
+  1127→          <div
+  1128→            onClick={onTap}
+  1129→            style={{ display: "flex", justifyContent: "space-between", alignItems: "center", cursor: "pointer", marginBottom: 10 }}
+  1130→          >
+  1131→            <span style={{ fontSize: 13, fontWeight: 600 }}>Analysis</span>
+  1132→            <ChevronDown size={15} color={COLORS.textMuted} />
+  1133→          </div>
+  1134→
+  1135→          <Section title="Position">
+  1136→            <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 4 }}>
+  1137→              <span style={{ fontSize: 20, fontWeight: 700, color: evColor, fontVariantNumeric: "tabular-nums" }}>
+  1138→                {ev.display > 0 ? "+" : ""}
+  1139→                {ev.display}
+  1140→              </span>
+  1141→              <span style={{ fontSize: 12.5, color: evColor }}>{evLabel}</span>
+  1142→            </div>
+  1143→            <div style={{ display: "flex", height: 6, borderRadius: 3, overflow: "hidden", marginBottom: 4 }}>
+  1144→              <div style={{ width: `${analysis.playerWinPct}%`, background: COLORS.accent }} />
+  1145→              <div style={{ width: `${analysis.aiWinPct}%`, background: COLORS.stone2 }} />
+  1146→            </div>
+  1147→            <div style={{ fontSize: 11, color: COLORS.textMuted }}>
+  1148→              You {analysis.playerWinPct}% · AI {analysis.aiWinPct}% win probability
+  1149→            </div>
+  1150→          </Section>
+  1151→
+  1152→          <Section title="AI reasoning">
+  1153→            <div style={{ fontSize: 12.5, color: COLORS.text }}>
+  1154→              Played {cellLabel(analysis.aiReasonCell, n)} — {REASON_TEXT[analysis.aiReason] || "Building position."}
+  1155→            </div>
+  1156→          </Section>
+  1157→
+  1158→          <TwoCol>
+  1159→            <Section title="Your best options">
+  1160→              {analysis.humanOptions.length === 0 && <Faint>No urgent options yet.</Faint>}
+  1161→              {analysis.humanOptions.map((o) => (
+  1162→                <Row key={o.cell}>
+  1163→                  <span style={{ fontVariantNumeric: "tabular-nums", fontWeight: 600, width: 34 }}>{cellLabel(o.cell, n)}</span>
+  1164→                  <CategoryChip category={o.category} isFork={o.isFork} />
+  1165→                </Row>
+  1166→              ))}
+  1167→            </Section>
+  1168→            <Section title="AI considered">
+  1169→              {analysis.aiConsidered.slice(0, 5).map((c) => {
+  1170→                const maxV = analysis.aiConsidered[0]?.visits || 1;
+  1171→                return (
+  1172→                  <Row key={c.cell}>
+  1173→                    <span style={{ fontVariantNumeric: "tabular-nums", fontWeight: 600, width: 34 }}>{cellLabel(c.cell, n)}</span>
+  1174→                    <div style={{ flex: 1, height: 5, borderRadius: 3, background: COLORS.panelAlt, overflow: "hidden" }}>
+  1175→                      <div style={{ width: `${(c.visits / maxV) * 100}%`, height: "100%", background: COLORS.amber }} />
+  1176→                    </div>
+  1177→                    <span style={{ fontSize: 11, color: COLORS.textFaint, width: 34, textAlign: "right" }}>{Math.round(c.winRate * 100)}%</span>
+  1178→                  </Row>
+  1179→                );
+  1180→              })}
+  1181→            </Section>
+  1182→          </TwoCol>
+  1183→
+  1184→          <Section title="Threats on the board">
+  1185→            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+  1186→              <ThreatList label="You" counts={analysis.threats.player} />
+  1187→              <ThreatList label="AI" counts={analysis.threats.ai} />
+  1188→            </div>
+  1189→          </Section>
+  1190→
+  1191→          {analysis.scoring && (
+  1192→            <Section title="Score forecast">
+  1193→              <div style={{ fontSize: 11.5, color: COLORS.textMuted, marginBottom: 6 }}>
+  1194→                {analysis.scoring.remaining} moves left · board {analysis.scoring.fillPct}% full
+  1195→              </div>
+  1196→              <div style={{ fontSize: 12.5, marginBottom: 8 }}>
+  1197→                Pace {analysis.scoring.playerPace.toFixed(1)} / {analysis.scoring.aiPace.toFixed(1)} pts per move · projected final ~
+  1198→                {analysis.scoring.projPlayer} / ~{analysis.scoring.projAi}
+  1199→              </div>
+  1200→              <TwoCol>
+  1201→                <div>
+  1202→                  <Faint>Your best scoring moves</Faint>
+  1203→                  {analysis.scoring.playerMoves.map((m) => (
+  1204→                    <Row key={m.cell}>
+  1205→                      <span style={{ fontVariantNumeric: "tabular-nums", fontWeight: 600, width: 34 }}>{cellLabel(m.cell, n)}</span>
+  1206→                      <span style={{ color: COLORS.accent, fontSize: 12 }}>+{m.delta}</span>
+  1207→                    </Row>
+  1208→                  ))}
+  1209→                </div>
+  1210→                <div>
+  1211→                  <Faint>
+  1212→                    <Shield size={11} style={{ verticalAlign: -2, marginRight: 3 }} />
+  1213→                    AI's scoring threats
+  1214→                  </Faint>
+  1215→                  {analysis.scoring.aiThreats.map((m) => (
+  1216→                    <Row key={m.cell}>
+  1217→                      <span style={{ fontVariantNumeric: "tabular-nums", fontWeight: 600, width: 34 }}>{cellLabel(m.cell, n)}</span>
+  1218→                      <span style={{ color: COLORS.alert, fontSize: 12 }}>+{m.delta}</span>
+  1219→                    </Row>
+  1220→                  ))}
+  1221→                </div>
+  1222→              </TwoCol>
+  1223→            </Section>
+  1224→          )}
+  1225→
+  1226→          <Section title="Search">
+  1227→            <div style={{ fontSize: 11.5, color: COLORS.textMuted, display: "flex", flexWrap: "wrap", gap: "4px 12px" }}>
+  1228→              <span>{analysis.mcts.simulations.toLocaleString()} simulations</span>
+  1229→              <span>{analysis.mcts.elapsedMs}ms</span>
+  1230→              <span>β {analysis.mcts.raveBeta.toFixed(2)}</span>
+  1231→              <span>{Math.round(analysis.mcts.totalVisits).toLocaleString()} tree visits</span>
+  1232→            </div>
+  1233→          </Section>
+  1234→
+  1235→          <Section title="Auto-peek duration">
+  1236→            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+  1237→              <input
+  1238→                type="number"
+  1239→                min={200}
+  1240→                max={60000}
+  1241→                step={100}
+  1242→                value={peekDurationMs}
+  1243→                onChange={(e) => setPeekDurationMs(Math.max(200, Math.min(60000, Number(e.target.value) || 200)))}
+  1244→                style={{
+  1245→                  width: 90,
+  1246→                  padding: "6px 8px",
+  1247→                  borderRadius: 6,
+  1248→                  border: `1px solid ${COLORS.border}`,
+  1249→                  background: COLORS.panelAlt,
+  1250→                  color: COLORS.text,
+  1251→                  fontSize: 12.5,
+  1252→                  fontVariantNumeric: "tabular-nums",
+  1253→                }}
+  1254→              />
+  1255→              <span style={{ fontSize: 11.5, color: COLORS.textFaint }}>ms before this panel auto-hides after a move</span>
+  1256→            </div>
+  1257→          </Section>
+  1258→        </div>
+  1259→      )}
+  1260→    </div>
+  1261→  );
+  1262→}
+  1263→function Section({ title, children }) {
+  1264→  return (
+  1265→    <div style={{ marginBottom: 12 }}>
+  1266→      <div style={{ fontSize: 10.5, letterSpacing: 0.4, color: COLORS.textFaint, marginBottom: 5, textTransform: "uppercase" }}>{title}</div>
+  1267→      {children}
+  1268→    </div>
+  1269→  );
+  1270→}
+  1271→function TwoCol({ children }) {
+  1272→  return <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>{children}</div>;
+  1273→}
+  1274→function Row({ children }) {
+  1275→  return <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "3px 0" }}>{children}</div>;
+  1276→}
+  1277→function Faint({ children }) {
+  1278→  return <div style={{ fontSize: 11.5, color: COLORS.textFaint, marginBottom: 3 }}>{children}</div>;
+  1279→}
+  1280→function ThreatList({ label, counts }) {
+  1281→  const entries = Object.entries(counts).filter(([, v]) => v > 0);
+  1282→  return (
+  1283→    <div>
+  1284→      <Faint>{label}</Faint>
+  1285→      {entries.length === 0 && <div style={{ fontSize: 11.5, color: COLORS.textFaint }}>None</div>}
+  1286→      {entries.map(([k, v]) => (
+  1287→        <div key={k} style={{ fontSize: 11.5, color: COLORS.text, display: "flex", justifyContent: "space-between" }}>
+  1288→          <span>{k.replace(/_/g, " ").toLowerCase()}</span>
+  1289→          <span style={{ fontVariantNumeric: "tabular-nums" }}>{v}</span>
+  1290→        </div>
+  1291→      ))}
+  1292→    </div>
+  1293→  );
+  1294→}
+  1295→
+  1296→function SettingsPanel({ open, onClose, n, setN, winLen, setWinLen, mode, setMode, firstPlayer, setFirstPlayer, simulations, setSimulations, timeLimitMs, setTimeLimitMs, onTrain, training, trainResult, raveVisits }) {
+  1297→  if (!open) return null;
+  1298→  return (
+  1299→    <div
+  1300→      style={{ position: "absolute", inset: 0, background: "rgba(0,0,0,0.45)", zIndex: 20, display: "flex", justifyContent: "flex-end" }}
+  1301→      onClick={onClose}
+  1302→    >
+  1303→      <div
+  1304→        onClick={(e) => e.stopPropagation()}
+  1305→        style={{ width: "min(360px, 92vw)", height: "100%", background: COLORS.panel, borderLeft: `1px solid ${COLORS.border}`, padding: 18, overflowY: "auto" }}
+  1306→      >
+  1307→        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+  1308→          <span style={{ fontSize: 15, fontWeight: 600 }}>Settings</span>
+  1309→          <button onClick={onClose} aria-label="Close settings" style={{ background: "none", border: "none", color: COLORS.textMuted, cursor: "pointer", minWidth: 40, minHeight: 40 }}>
+  1310→            <X size={18} />
+  1311→          </button>
+  1312→        </div>
+  1313→
+  1314→        <SettingRow label="Mode">
+  1315→          <div style={{ display: "flex", gap: 6 }}>
+  1316→            {[
+  1317→              ["classic", "Classic"],
+  1318→              ["scoring", "Score Attack"],
+  1319→            ].map(([val, lab]) => (
+  1320→              <button
+  1321→                key={val}
+  1322→                onClick={() => setMode(val)}
+  1323→                style={{
+  1324→                  flex: 1,
+  1325→                  padding: "8px 0",
+  1326→                  minHeight: 40,
+  1327→                  borderRadius: 8,
+  1328→                  border: `1px solid ${mode === val ? COLORS.accent : COLORS.border}`,
+  1329→                  background: mode === val ? COLORS.accent : COLORS.panelAlt,
+  1330→                  color: "#fff",
+  1331→                  fontSize: 13,
+  1332→                  cursor: "pointer",
+  1333→                }}
+  1334→              >
+  1335→                {lab}
+  1336→              </button>
+  1337→            ))}
+  1338→          </div>
+  1339→          <Faint>{mode === "classic" ? `First to connect ${winLen} wins.` : "Plays to a full board; most points wins."}</Faint>
+  1340→        </SettingRow>
+  1341→
+  1342→        <SettingRow label={`Board size — ${n}×${n}`}>
+  1343→          <input type="range" min={5} max={15} step={2} value={n} onChange={(e) => setN(Number(e.target.value))} style={{ width: "100%" }} />
+  1344→        </SettingRow>
+  1345→
+  1346→        {mode === "classic" && (
+  1347→          <SettingRow label={`Win length — ${winLen}`}>
+  1348→            <input type="range" min={3} max={n} step={1} value={winLen} onChange={(e) => setWinLen(Number(e.target.value))} style={{ width: "100%" }} />
+  1349→          </SettingRow>
+  1350→        )}
+  1351→
+  1352→        <SettingRow label="Who plays first">
+  1353→          <div style={{ display: "flex", gap: 6 }}>
+  1354→            {[
+  1355→              [1, "You"],
+  1356→              [2, "AI"],
+  1357→            ].map(([val, lab]) => (
+  1358→              <button
+  1359→                key={val}
+  1360→                onClick={() => setFirstPlayer(val)}
+  1361→                style={{
+  1362→                  flex: 1,
+  1363→                  padding: "8px 0",
+  1364→                  minHeight: 40,
+  1365→                  borderRadius: 8,
+  1366→                  border: `1px solid ${firstPlayer === val ? COLORS.accent : COLORS.border}`,
+  1367→                  background: firstPlayer === val ? COLORS.accent : COLORS.panelAlt,
+  1368→                  color: "#fff",
+  1369→                  fontSize: 13,
+  1370→                  cursor: "pointer",
+  1371→                }}
+  1372→              >
+  1373→                {lab}
+  1374→              </button>
+  1375→            ))}
+  1376→          </div>
+  1377→        </SettingRow>
+  1378→
+  1379→        <SettingRow label={`Thinking budget — ${simulations.toLocaleString()} sims, ${(timeLimitMs / 1000).toFixed(1)}s cap`}>
+  1380→          <input type="range" min={200} max={6000} step={100} value={simulations} onChange={(e) => setSimulations(Number(e.target.value))} style={{ width: "100%" }} />
+  1381→          <input type="range" min={300} max={3000} step={100} value={timeLimitMs} onChange={(e) => setTimeLimitMs(Number(e.target.value))} style={{ width: "100%", marginTop: 6 }} />
+  1382→        </SettingRow>
+  1383→
+  1384→        <SettingRow label="Quick train">
+  1385→          <Faint>Runs fast self-play games (no tree search) to seed this exact board size + mode before you play.</Faint>
+  1386→          <div style={{ display: "flex", gap: 8, marginTop: 4 }}>
+  1387→            <button
+  1388→              onClick={() => onTrain(200)}
+  1389→              disabled={training}
+  1390→              style={{ flex: 1, padding: "9px 0", minHeight: 40, borderRadius: 8, border: `1px solid ${COLORS.border}`, background: COLORS.panelAlt, color: "#fff", cursor: training ? "default" : "pointer", opacity: training ? 0.6 : 1, fontSize: 13 }}
+  1391→            >
+  1392→              {training ? "Training…" : "Train 200 games"}
+  1393→            </button>
+  1394→          </div>
+  1395→          {trainResult && (
+  1396→            <Faint>
+  1397→              Last run: P1 {trainResult.p1} · P2 {trainResult.p2} · draw {trainResult.draw}
+  1398→            </Faint>
+  1399→          )}
+  1400→          <Faint>Table for this config: {Math.round(raveVisits).toLocaleString()} accumulated visits</Faint>
+
+[showing lines 701-1400 of 1801; use offset=1401 with limit to continue reading]

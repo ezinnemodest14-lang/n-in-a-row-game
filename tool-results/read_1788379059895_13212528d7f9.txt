@@ -1,0 +1,702 @@
+     1→   701→        path.push(node);
+     2→   702→        curPlayer = curPlayer === 1 ? 2 : 1;
+     3→   703→      }
+     4→   704→    }
+     5→   705→
+     6→   706→    // ---- Simulation ----
+     7→   707→    let reward1; // outcome from PLAYER 1's perspective, in [0,1]
+     8→   708→    let playoutMoves = [];
+     9→   709→    if (terminal) {
+    10→   710→      reward1 = terminalWinner === 1 ? 1 : 0;
+    11→   711→    } else if (legalMoves(state).length === 0 && mode === "classic") {
+    12→   712→      reward1 = 0.5;
+    13→   713→    } else {
+    14→   714→      const pl = runPlayout(state, n, winLen, mode, curPlayer, globalRave, rng, n * n + 2);
+    15→   715→      playoutMoves = pl.played;
+    16→   716→      if (mode === "classic") {
+    17→   717→        reward1 = pl.winner === 0 ? 0.5 : pl.winner === 1 ? 1 : 0;
+    18→   718→      } else {
+    19→   719→        reward1 = 1 / (1 + Math.exp(-pl.scoreDiff / Math.max(4, n)));
+    20→   720→      }
+    21→   721→    }
+    22→   722→    for (const mv of playoutMoves) {
+    23→   723→      const r = mv.player === 1 ? reward1 : 1 - reward1;
+    24→   724→      globalRave.update(mv.player, mv.cell, r);
+    25→   725→    }
+    26→   726→
+    27→   727→    // ---- Backprop ----
+    28→   728→    // Root always tracks value FOR aiPlayer (what "rootWinRate" reports).
+    29→   729→    path[0].visits += 1;
+    30→   730→    path[0].wins += aiPlayer === 1 ? reward1 : 1 - reward1;
+    31→   731→    // Every descendant tracks value for whoever MOVED to reach it, i.e.
+    32→   732→    // its parent's `.player` (the mover at the parent, which is exactly
+    33→   733→    // who selection compares children on behalf of).
+    34→   734→    for (let i = 1; i < path.length; i++) {
+    35→   735→      const moverToReachThis = path[i - 1].player;
+    36→   736→      path[i].visits += 1;
+    37→   737→      path[i].wins += moverToReachThis === 1 ? reward1 : 1 - reward1;
+    38→   738→    }
+    39→   739→  }
+    40→   740→
+    41→   741→  let bestCell = null,
+    42→   742→    bestVisits = -1;
+    43→   743→  const rootChildren = [];
+    44→   744→  for (const [cell, child] of root.children) {
+    45→   745→    if (board[cell] !== 0) continue;
+    46→   746→    rootChildren.push({ cell, visits: child.visits, winRate: child.visits > 0 ? child.wins / child.visits : 0 });
+    47→   747→    if (child.visits > bestVisits) {
+    48→   748→      bestVisits = child.visits;
+    49→   749→      bestCell = cell;
+    50→   750→    }
+    51→   751→  }
+    52→   752→  rootChildren.sort((a, b) => b.visits - a.visits);
+    53→   753→
+    54→   754→  const override = tacticalMove(board, n, winLen, aiPlayer, humanPlayer);
+    55→   755→  if (override && board[override.cell] === 0) bestCell = override.cell;
+    56→   756→  if (bestCell === null || board[bestCell] !== 0) {
+    57→   757→    const lm = legalMoves(board);
+    58→   758→    bestCell = lm[Math.floor(rng() * lm.length)];
+    59→   759→  }
+    60→   760→
+    61→   761→  const rootWinRate = root.visits > 0 ? root.wins / root.visits : 0.5;
+    62→   762→  return {
+    63→   763→    move: bestCell,
+    64→   764→    reason: override ? override.reason : "search",
+    65→   765→    simulations: sims,
+    66→   766→    elapsedMs: Date.now() - start,
+    67→   767→    rootWinRate,
+    68→   768→    raveBeta: raveBeta(root.visits),
+    69→   769→    topChildren: rootChildren.slice(0, 6),
+    70→   770→    totalVisits: root.visits,
+    71→   771→  };
+    72→   772→}
+    73→   773→
+    74→   774→// ============================================================================
+    75→   775→// REACT UI LAYER
+    76→   776→// ============================================================================
+    77→   777→const COLORS = {
+    78→   778→  app: "#14171c",
+    79→   779→  panel: "#1b2028",
+    80→   780→  panelAlt: "#212832",
+    81→   781→  border: "#2b323d",
+    82→   782→  text: "#e9ecf1",
+    83→   783→  textMuted: "#8b95a5",
+    84→   784→  textFaint: "#5b6472",
+    85→   785→  boardFrame: "#4a3626",
+    86→   786→  cell: "#d9ab5f",
+    87→   787→  cellLine: "#5f4a30",
+    88→   788→  stone1: "#f2ead8",
+    89→   789→  stone1Ring: "#c2b190",
+    90→   790→  stone2: "#20242a",
+    91→   791→  accent: "#3f8f5f",
+    92→   792→  accentHover: "#4aa26b",
+    93→   793→  alert: "#c0483f",
+    94→   794→  amber: "#c98a3b",
+    95→   795→};
+    96→   796→
+    97→   797→const CAT_COLOR = {
+    98→   798→  0: COLORS.textFaint,
+    99→   799→  1: COLORS.textFaint,
+   100→   800→  2: COLORS.textFaint,
+   101→   801→  3: COLORS.textMuted,
+   102→   802→  4: COLORS.amber,
+   103→   803→  5: COLORS.amber,
+   104→   804→  6: COLORS.alert,
+   105→   805→  7: COLORS.alert,
+   106→   806→  8: COLORS.alert,
+   107→   807→};
+   108→   808→
+   109→   809→function colLabel(c) {
+   110→   810→  return String.fromCharCode(65 + c);
+   111→   811→}
+   112→   812→function rowLabel(r, n) {
+   113→   813→  return n - r;
+   114→   814→}
+   115→   815→function cellLabel(cell, n) {
+   116→   816→  return colLabel(cell % n) + rowLabel(Math.floor(cell / n), n);
+   117→   817→}
+   118→   818→
+   119→   819→function freshGame(n, firstPlayer) {
+   120→   820→  return {
+   121→   821→    board: emptyBoard(n),
+   122→   822→    player: firstPlayer,
+   123→   823→    status: "playing",
+   124→   824→    winner: 0,
+   125→   825→    moveHistory: [],
+   126→   826→    scores: { 1: 0, 2: 0 },
+   127→   827→  };
+   128→   828→}
+   129→   829→
+   130→   830→const REASON_TEXT = {
+   131→   831→  win: "Completes a winning line.",
+   132→   832→  "block-win": "Blocking your winning line — one more move and you'd have won.",
+   133→   833→  "open-four": "Creates an open four — unstoppable next turn from either end.",
+   134→   834→  "block-four": "Blocking your simple four before it could complete.",
+   135→   835→  "block-open-four": "Trying to slow an open four — it likely can't be fully stopped now.",
+   136→   836→  fork: "Creates a fork — two live threats at once, so only one can be blocked.",
+   137→   837→  "block-open-three": "Blocking your open three before it becomes an open four.",
+   138→   838→  search: "No forcing move available — playing the strongest position the search found.",
+   139→   839→};
+   140→   840→
+   141→   841→function countThreats(board, n, player, winLen) {
+   142→   842→  const keys = ["SIMPLE_THREE", "BROKEN_THREE", "OPEN_THREE", "SIMPLE_FOUR", "OPEN_FOUR"];
+   143→   843→  const counts = Object.fromEntries(keys.map((k) => [k, 0]));
+   144→   844→  const cells = classifyBoard(board, n, player, winLen);
+   145→   845→  for (const [, c] of cells) {
+   146→   846→    for (const k of keys) if (CAT[k] === c.category) counts[k]++;
+   147→   847→  }
+   148→   848→  return counts;
+   149→   849→}
+   150→   850→
+   151→   851→function buildScoringAnalysis(board, n, scores) {
+   152→   852→  const remaining = legalMoves(board).length;
+   153→   853→  const filled = n * n - remaining;
+   154→   854→  const fillPct = Math.round((filled / (n * n)) * 100);
+   155→   855→  const halfFilled = Math.max(1, filled / 2);
+   156→   856→  const playerPace = scores[1] / halfFilled;
+   157→   857→  const aiPace = scores[2] / halfFilled;
+   158→   858→  const halfRemaining = remaining / 2;
+   159→   859→  const projPlayer = Math.round(scores[1] + playerPace * halfRemaining);
+   160→   860→  const projAi = Math.round(scores[2] + aiPace * halfRemaining);
+   161→   861→
+   162→   862→  const playerMoves = legalMoves(board)
+   163→   863→    .map((cell) => {
+   164→   864→      const row = Math.floor(cell / n),
+   165→   865→        col = cell % n;
+   166→   866→      return { cell, delta: scoreMoveDelta(board, n, row, col, 1) };
+   167→   867→    })
+   168→   868→    .filter((m) => m.delta > 0)
+   169→   869→    .sort((a, b) => b.delta - a.delta)
+   170→   870→    .slice(0, 5);
+   171→   871→
+   172→   872→  const aiThreats = legalMoves(board)
+   173→   873→    .map((cell) => {
+   174→   874→      const row = Math.floor(cell / n),
+   175→   875→        col = cell % n;
+   176→   876→      return { cell, delta: scoreMoveDelta(board, n, row, col, 2) };
+   177→   877→    })
+   178→   878→    .filter((m) => m.delta > 0)
+   179→   879→    .sort((a, b) => b.delta - a.delta)
+   180→   880→    .slice(0, 5);
+   181→   881→
+   182→   882→  return { remaining, fillPct, playerPace, aiPace, projPlayer, projAi, playerMoves, aiThreats };
+   183→   883→}
+   184→   884→
+   185→   885→function buildAnalysis(board, n, winLen, mode, mctsResult, scores) {
+   186→   886→  const ev = evaluatePosition(board, n, winLen);
+   187→   887→  const aiWinPctRaw = Math.round(mctsResult.rootWinRate * 100);
+   188→   888→  const aiWinPct = Math.max(0, Math.min(100, aiWinPctRaw));
+   189→   889→  const playerWinPct = 100 - aiWinPct; // derive, never round both independently (bug #17)
+   190→   890→
+   191→   891→  const humanCells = classifyBoard(board, n, 1, winLen);
+   192→   892→  const humanOptions = [...humanCells.entries()]
+   193→   893→    .filter(([, c]) => c.category > CAT.NONE)
+   194→   894→    .sort((a, b) => b[1].score - a[1].score)
+   195→   895→    .slice(0, 5)
+   196→   896→    .map(([cell, c]) => ({ cell, category: c.category, isFork: c.isFork }));
+   197→   897→
+   198→   898→  const threats = { player: countThreats(board, n, 1, winLen), ai: countThreats(board, n, 2, winLen) };
+   199→   899→
+   200→   900→  return {
+   201→   901→    eval: ev,
+   202→   902→    playerWinPct,
+   203→   903→    aiWinPct,
+   204→   904→    aiReasonCell: mctsResult.move,
+   205→   905→    aiReason: mctsResult.reason,
+   206→   906→    humanOptions,
+   207→   907→    aiConsidered: mctsResult.topChildren,
+   208→   908→    threats,
+   209→   909→    mcts: {
+   210→   910→      simulations: mctsResult.simulations,
+   211→   911→      elapsedMs: mctsResult.elapsedMs,
+   212→   912→      raveBeta: mctsResult.raveBeta,
+   213→   913→      totalVisits: mctsResult.totalVisits,
+   214→   914→    },
+   215→   915→    scoring: mode === "scoring" ? buildScoringAnalysis(board, n, scores) : null,
+   216→   916→  };
+   217→   917→}
+   218→   918→
+   219→   919→// ---------------------------------------------------------------------------
+   220→   920→// Small building blocks
+   221→   921→// ---------------------------------------------------------------------------
+   222→   922→function IconBtn({ onClick, title, icon, label, active, disabled }) {
+   223→   923→  return (
+   224→   924→    <button
+   225→   925→      onClick={onClick}
+   226→   926→      title={title}
+   227→   927→      aria-label={title}
+   228→   928→      disabled={disabled}
+   229→   929→      style={{
+   230→   930→        display: "inline-flex",
+   231→   931→        alignItems: "center",
+   232→   932→        gap: 6,
+   233→   933→        padding: "8px 12px",
+   234→   934→        minHeight: 40,
+   235→   935→        borderRadius: 8,
+   236→   936→        background: active ? COLORS.accent : COLORS.panelAlt,
+   237→   937→        color: active ? "#fff" : COLORS.text,
+   238→   938→        border: `1px solid ${active ? COLORS.accent : COLORS.border}`,
+   239→   939→        fontSize: 13.5,
+   240→   940→        fontWeight: 500,
+   241→   941→        cursor: disabled ? "default" : "pointer",
+   242→   942→        opacity: disabled ? 0.5 : 1,
+   243→   943→        whiteSpace: "nowrap",
+   244→   944→      }}
+   245→   945→    >
+   246→   946→      {icon}
+   247→   947→      <span className="ibtn-label">{label}</span>
+   248→   948→    </button>
+   249→   949→  );
+   250→   950→}
+   251→   951→
+   252→   952→function EvalBar({ playerPct, aiPct, thinking, mode, scores }) {
+   253→   953→  const playerFrac = mode === "scoring" ? (scores[1] + scores[2] > 0 ? scores[1] / (scores[1] + scores[2]) : 0.5) : playerPct / 100;
+   254→   954→  return (
+   255→   955→    <div style={{ width: 26, display: "flex", flexDirection: "column", alignItems: "center", opacity: thinking ? 0.35 : 1, transition: "opacity 160ms" }}>
+   256→   956→      <div style={{ fontSize: 10.5, color: COLORS.textFaint, marginBottom: 4, fontVariantNumeric: "tabular-nums" }}>
+   257→   957→        {mode === "scoring" ? scores[2] : Math.round(100 - playerFrac * 100) + "%"}
+   258→   958→      </div>
+   259→   959→      <div style={{ flex: 1, width: 16, borderRadius: 8, overflow: "hidden", background: COLORS.stone2, display: "flex", flexDirection: "column-reverse", position: "relative" }}>
+   260→   960→        <div style={{ height: `${Math.max(2, Math.min(98, playerFrac * 100))}%`, background: COLORS.accent, transition: "height 260ms ease" }} />
+   261→   961→        {thinking && (
+   262→   962→          <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center" }}>
+   263→   963→            <div style={{ width: 8, height: 8, borderRadius: "50%", background: "#fff", animation: "pulseDot 1s infinite" }} />
+   264→   964→          </div>
+   265→   965→        )}
+   266→   966→      </div>
+   267→   967→      <div style={{ fontSize: 10.5, color: COLORS.textFaint, marginTop: 4, fontVariantNumeric: "tabular-nums" }}>
+   268→   968→        {mode === "scoring" ? scores[1] : Math.round(playerFrac * 100) + "%"}
+   269→   969→      </div>
+   270→   970→    </div>
+   271→   971→  );
+   272→   972→}
+   273→   973→
+   274→   974→function Board({ n, board, onCellClick, disabled, lastMove, sizePx }) {
+   275→   975→  const cellPx = sizePx / n;
+   276→   976→  return (
+   277→   977→    <div style={{ background: COLORS.boardFrame, borderRadius: 10, padding: Math.max(6, cellPx * 0.18), display: "inline-block" }}>
+   278→   978→      <div style={{ display: "flex" }}>
+   279→   979→        <div style={{ display: "flex", flexDirection: "column", marginRight: 4 }}>
+   280→   980→          {Array.from({ length: n }, (_, r) => (
+   281→   981→            <div key={r} style={{ height: cellPx, display: "flex", alignItems: "center", justifyContent: "flex-end", fontSize: Math.max(9, cellPx * 0.28), color: COLORS.text, opacity: 0.65, width: 16, fontVariantNumeric: "tabular-nums" }}>
+   282→   982→              {rowLabel(r, n)}
+   283→   983→            </div>
+   284→   984→          ))}
+   285→   985→        </div>
+   286→   986→        <div>
+   287→   987→          <div
+   288→   988→            style={{
+   289→   989→              display: "grid",
+   290→   990→              gridTemplateColumns: `repeat(${n}, ${cellPx}px)`,
+   291→   991→              gridTemplateRows: `repeat(${n}, ${cellPx}px)`,
+   292→   992→              gap: 1,
+   293→   993→              background: COLORS.cellLine,
+   294→   994→            }}
+   295→   995→          >
+   296→   996→            {Array.from(board).map((val, i) => {
+   297→   997→              const isLast = lastMove === i;
+   298→   998→              return (
+   299→   999→                <button
+   300→  1000→                  key={i}
+   301→  1001→                  onClick={() => onCellClick(i)}
+   302→  1002→                  disabled={disabled || val !== 0}
+   303→  1003→                  style={{
+   304→  1004→                    width: cellPx,
+   305→  1005→                    height: cellPx,
+   306→  1006→                    background: COLORS.cell,
+   307→  1007→                    border: "none",
+   308→  1008→                    padding: 0,
+   309→  1009→                    display: "flex",
+   310→  1010→                    alignItems: "center",
+   311→  1011→                    justifyContent: "center",
+   312→  1012→                    cursor: disabled || val !== 0 ? "default" : "pointer",
+   313→  1013→                  }}
+   314→  1014→                >
+   315→  1015→                  {val !== 0 && (
+   316→  1016→                    <div
+   317→  1017→                      style={{
+   318→  1018→                        width: cellPx - Math.max(4, cellPx * 0.16),
+   319→  1019→                        height: cellPx - Math.max(4, cellPx * 0.16),
+   320→  1020→                        borderRadius: "50%",
+   321→  1021→                        background: val === 1 ? COLORS.stone1 : COLORS.stone2,
+   322→  1022→                        boxShadow:
+   323→  1023→                          val === 1
+   324→  1024→                            ? `inset 0 0 0 1px ${COLORS.stone1Ring}, 0 1px 2px rgba(0,0,0,.35)${isLast ? `, 0 0 0 2px ${COLORS.accent}` : ""}`
+   325→  1025→                            : `0 1px 2px rgba(0,0,0,.5)${isLast ? `, 0 0 0 2px ${COLORS.accent}` : ""}`,
+   326→  1026→                    }}
+   327→  1027→                  />
+   328→  1028→                  )}
+   329→  1029→                </button>
+   330→  1030→              );
+   331→  1031→            })}
+   332→  1032→          </div>
+   333→  1033→          <div style={{ display: "grid", gridTemplateColumns: `repeat(${n}, ${cellPx}px)`, marginTop: 4 }}>
+   334→  1034→            {Array.from({ length: n }, (_, c) => (
+   335→  1035→              <div key={c} style={{ textAlign: "center", fontSize: Math.max(9, cellPx * 0.28), color: COLORS.text, opacity: 0.65, fontVariantNumeric: "tabular-nums" }}>
+   336→  1036→                {colLabel(c)}
+   337→  1037→              </div>
+   338→  1038→            ))}
+   339→  1039→          </div>
+   340→  1040→        </div>
+   341→  1041→      </div>
+   342→  1042→    </div>
+   343→  1043→  );
+   344→  1044→}
+   345→  1045→
+   346→  1046→function CategoryChip({ category, isFork }) {
+   347→  1047→  return (
+   348→  1048→    <span
+   349→  1049→      style={{
+   350→  1050→        fontSize: 11,
+   351→  1051→        padding: "2px 7px",
+   352→  1052→        borderRadius: 999,
+   353→  1053→        color: "#fff",
+   354→  1054→        background: CAT_COLOR[category],
+   355→  1055→        whiteSpace: "nowrap",
+   356→  1056→      }}
+   357→  1057→    >
+   358→  1058→      {isFork ? "Fork" : CAT_NAME[category]}
+   359→  1059→    </span>
+   360→  1060→  );
+   361→  1061→}
+   362→  1062→
+   363→  1063→function AnalysisPanel({ analysis, n, mode, expanded, onEnter, onLeave, onTap, peekDurationMs, setPeekDurationMs, thinking }) {
+   364→  1064→  if (!analysis) {
+   365→  1065→    return (
+   366→  1066→      <div
+   367→  1067→        onMouseEnter={onEnter}
+   368→  1068→        onMouseLeave={onLeave}
+   369→  1069→        onClick={onTap}
+   370→  1070→        style={{
+   371→  1071→          position: "absolute",
+   372→  1072→          left: 0,
+   373→  1073→          right: 0,
+   374→  1074→          bottom: 0,
+   375→  1075→          textAlign: "center",
+   376→  1076→          padding: "8px 0",
+   377→  1077→          fontSize: 12,
+   378→  1078→          color: COLORS.textFaint,
+   379→  1079→          cursor: "pointer",
+   380→  1080→        }}
+   381→  1081→      >
+   382→  1082→        Play a move to see analysis
+   383→  1083→      </div>
+   384→  1084→    );
+   385→  1085→  }
+   386→  1086→  const ev = analysis.eval;
+   387→  1087→  const evColor = ev.raw > 8 ? COLORS.accent : ev.raw < -8 ? COLORS.alert : COLORS.textMuted;
+   388→  1088→  const evLabel = Math.abs(ev.raw) < 5 ? "Even" : ev.raw > 0 ? (ev.raw > 20 ? "Winning" : "Slight edge") : ev.raw < -20 ? "Losing" : "Slight edge (AI)";
+   389→  1089→
+   390→  1090→  return (
+   391→  1091→    <div style={{ position: "absolute", left: 0, right: 0, bottom: 0 }}>
+   392→  1092→      {!expanded && (
+   393→  1093→        <div
+   394→  1094→          onMouseEnter={onEnter}
+   395→  1095→          onClick={onTap}
+   396→  1096→          style={{
+   397→  1097→            display: "flex",
+   398→  1098→            alignItems: "center",
+   399→  1099→            justifyContent: "center",
+   400→  1100→            gap: 6,
+   401→  1101→            padding: "7px 0",
+   402→  1102→            fontSize: 12.5,
+   403→  1103→            color: COLORS.text,
+   404→  1104→            background: `linear-gradient(0deg, ${COLORS.panel}ee, transparent)`,
+   405→  1105→            cursor: "pointer",
+   406→  1106→          }}
+   407→  1107→        >
+   408→  1108→          <span style={{ width: 7, height: 7, borderRadius: "50%", background: evColor }} />
+   409→  1109→          Analysis {ev.display > 0 ? "+" : ""}
+   410→  1110→          {ev.display}
+   411→  1111→          <ChevronUp size={13} />
+   412→  1112→        </div>
+   413→  1113→      )}
+   414→  1114→      {expanded && (
+   415→  1115→        <div
+   416→  1116→          onMouseLeave={onLeave}
+   417→  1117→          style={{
+   418→  1118→            background: "rgba(27,32,40,0.92)",
+   419→  1119→            backdropFilter: "blur(14px)",
+   420→  1120→            borderTop: `1px solid ${COLORS.border}`,
+   421→  1121→            borderRadius: "12px 12px 0 0",
+   422→  1122→            maxHeight: "72%",
+   423→  1123→            overflowY: "auto",
+   424→  1124→            padding: 14,
+   425→  1125→          }}
+   426→  1126→        >
+   427→  1127→          <div
+   428→  1128→            onClick={onTap}
+   429→  1129→            style={{ display: "flex", justifyContent: "space-between", alignItems: "center", cursor: "pointer", marginBottom: 10 }}
+   430→  1130→          >
+   431→  1131→            <span style={{ fontSize: 13, fontWeight: 600 }}>Analysis</span>
+   432→  1132→            <ChevronDown size={15} color={COLORS.textMuted} />
+   433→  1133→          </div>
+   434→  1134→
+   435→  1135→          <Section title="Position">
+   436→  1136→            <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 4 }}>
+   437→  1137→              <span style={{ fontSize: 20, fontWeight: 700, color: evColor, fontVariantNumeric: "tabular-nums" }}>
+   438→  1138→                {ev.display > 0 ? "+" : ""}
+   439→  1139→                {ev.display}
+   440→  1140→              </span>
+   441→  1141→              <span style={{ fontSize: 12.5, color: evColor }}>{evLabel}</span>
+   442→  1142→            </div>
+   443→  1143→            <div style={{ display: "flex", height: 6, borderRadius: 3, overflow: "hidden", marginBottom: 4 }}>
+   444→  1144→              <div style={{ width: `${analysis.playerWinPct}%`, background: COLORS.accent }} />
+   445→  1145→              <div style={{ width: `${analysis.aiWinPct}%`, background: COLORS.stone2 }} />
+   446→  1146→            </div>
+   447→  1147→            <div style={{ fontSize: 11, color: COLORS.textMuted }}>
+   448→  1148→              You {analysis.playerWinPct}% · AI {analysis.aiWinPct}% win probability
+   449→  1149→            </div>
+   450→  1150→          </Section>
+   451→  1151→
+   452→  1152→          <Section title="AI reasoning">
+   453→  1153→            <div style={{ fontSize: 12.5, color: COLORS.text }}>
+   454→  1154→              Played {cellLabel(analysis.aiReasonCell, n)} — {REASON_TEXT[analysis.aiReason] || "Building position."}
+   455→  1155→            </div>
+   456→  1156→          </Section>
+   457→  1157→
+   458→  1158→          <TwoCol>
+   459→  1159→            <Section title="Your best options">
+   460→  1160→              {analysis.humanOptions.length === 0 && <Faint>No urgent options yet.</Faint>}
+   461→  1161→              {analysis.humanOptions.map((o) => (
+   462→  1162→                <Row key={o.cell}>
+   463→  1163→                  <span style={{ fontVariantNumeric: "tabular-nums", fontWeight: 600, width: 34 }}>{cellLabel(o.cell, n)}</span>
+   464→  1164→                  <CategoryChip category={o.category} isFork={o.isFork} />
+   465→  1165→                </Row>
+   466→  1166→              ))}
+   467→  1167→            </Section>
+   468→  1168→            <Section title="AI considered">
+   469→  1169→              {analysis.aiConsidered.slice(0, 5).map((c) => {
+   470→  1170→                const maxV = analysis.aiConsidered[0]?.visits || 1;
+   471→  1171→                return (
+   472→  1172→                  <Row key={c.cell}>
+   473→  1173→                    <span style={{ fontVariantNumeric: "tabular-nums", fontWeight: 600, width: 34 }}>{cellLabel(c.cell, n)}</span>
+   474→  1174→                    <div style={{ flex: 1, height: 5, borderRadius: 3, background: COLORS.panelAlt, overflow: "hidden" }}>
+   475→  1175→                      <div style={{ width: `${(c.visits / maxV) * 100}%`, height: "100%", background: COLORS.amber }} />
+   476→  1176→                    </div>
+   477→  1177→                    <span style={{ fontSize: 11, color: COLORS.textFaint, width: 34, textAlign: "right" }}>{Math.round(c.winRate * 100)}%</span>
+   478→  1178→                  </Row>
+   479→  1179→                );
+   480→  1180→              })}
+   481→  1181→            </Section>
+   482→  1182→          </TwoCol>
+   483→  1183→
+   484→  1184→          <Section title="Threats on the board">
+   485→  1185→            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+   486→  1186→              <ThreatList label="You" counts={analysis.threats.player} />
+   487→  1187→              <ThreatList label="AI" counts={analysis.threats.ai} />
+   488→  1188→            </div>
+   489→  1189→          </Section>
+   490→  1190→
+   491→  1191→          {analysis.scoring && (
+   492→  1192→            <Section title="Score forecast">
+   493→  1193→              <div style={{ fontSize: 11.5, color: COLORS.textMuted, marginBottom: 6 }}>
+   494→  1194→                {analysis.scoring.remaining} moves left · board {analysis.scoring.fillPct}% full
+   495→  1195→              </div>
+   496→  1196→              <div style={{ fontSize: 12.5, marginBottom: 8 }}>
+   497→  1197→                Pace {analysis.scoring.playerPace.toFixed(1)} / {analysis.scoring.aiPace.toFixed(1)} pts per move · projected final ~
+   498→  1198→                {analysis.scoring.projPlayer} / ~{analysis.scoring.projAi}
+   499→  1199→              </div>
+   500→  1200→              <TwoCol>
+   501→  1201→                <div>
+   502→  1202→                  <Faint>Your best scoring moves</Faint>
+   503→  1203→                  {analysis.scoring.playerMoves.map((m) => (
+   504→  1204→                    <Row key={m.cell}>
+   505→  1205→                      <span style={{ fontVariantNumeric: "tabular-nums", fontWeight: 600, width: 34 }}>{cellLabel(m.cell, n)}</span>
+   506→  1206→                      <span style={{ color: COLORS.accent, fontSize: 12 }}>+{m.delta}</span>
+   507→  1207→                    </Row>
+   508→  1208→                  ))}
+   509→  1209→                </div>
+   510→  1210→                <div>
+   511→  1211→                  <Faint>
+   512→  1212→                    <Shield size={11} style={{ verticalAlign: -2, marginRight: 3 }} />
+   513→  1213→                    AI's scoring threats
+   514→  1214→                  </Faint>
+   515→  1215→                  {analysis.scoring.aiThreats.map((m) => (
+   516→  1216→                    <Row key={m.cell}>
+   517→  1217→                      <span style={{ fontVariantNumeric: "tabular-nums", fontWeight: 600, width: 34 }}>{cellLabel(m.cell, n)}</span>
+   518→  1218→                      <span style={{ color: COLORS.alert, fontSize: 12 }}>+{m.delta}</span>
+   519→  1219→                    </Row>
+   520→  1220→                  ))}
+   521→  1221→                </div>
+   522→  1222→              </TwoCol>
+   523→  1223→            </Section>
+   524→  1224→          )}
+   525→  1225→
+   526→  1226→          <Section title="Search">
+   527→  1227→            <div style={{ fontSize: 11.5, color: COLORS.textMuted, display: "flex", flexWrap: "wrap", gap: "4px 12px" }}>
+   528→  1228→              <span>{analysis.mcts.simulations.toLocaleString()} simulations</span>
+   529→  1229→              <span>{analysis.mcts.elapsedMs}ms</span>
+   530→  1230→              <span>β {analysis.mcts.raveBeta.toFixed(2)}</span>
+   531→  1231→              <span>{Math.round(analysis.mcts.totalVisits).toLocaleString()} tree visits</span>
+   532→  1232→            </div>
+   533→  1233→          </Section>
+   534→  1234→
+   535→  1235→          <Section title="Auto-peek duration">
+   536→  1236→            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+   537→  1237→              <input
+   538→  1238→                type="number"
+   539→  1239→                min={200}
+   540→  1240→                max={60000}
+   541→  1241→                step={100}
+   542→  1242→                value={peekDurationMs}
+   543→  1243→                onChange={(e) => setPeekDurationMs(Math.max(200, Math.min(60000, Number(e.target.value) || 200)))}
+   544→  1244→                style={{
+   545→  1245→                  width: 90,
+   546→  1246→                  padding: "6px 8px",
+   547→  1247→                  borderRadius: 6,
+   548→  1248→                  border: `1px solid ${COLORS.border}`,
+   549→  1249→                  background: COLORS.panelAlt,
+   550→  1250→                  color: COLORS.text,
+   551→  1251→                  fontSize: 12.5,
+   552→  1252→                  fontVariantNumeric: "tabular-nums",
+   553→  1253→                }}
+   554→  1254→              />
+   555→  1255→              <span style={{ fontSize: 11.5, color: COLORS.textFaint }}>ms before this panel auto-hides after a move</span>
+   556→  1256→            </div>
+   557→  1257→          </Section>
+   558→  1258→        </div>
+   559→  1259→      )}
+   560→  1260→    </div>
+   561→  1261→  );
+   562→  1262→}
+   563→  1263→function Section({ title, children }) {
+   564→  1264→  return (
+   565→  1265→    <div style={{ marginBottom: 12 }}>
+   566→  1266→      <div style={{ fontSize: 10.5, letterSpacing: 0.4, color: COLORS.textFaint, marginBottom: 5, textTransform: "uppercase" }}>{title}</div>
+   567→  1267→      {children}
+   568→  1268→    </div>
+   569→  1269→  );
+   570→  1270→}
+   571→  1271→function TwoCol({ children }) {
+   572→  1272→  return <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>{children}</div>;
+   573→  1273→}
+   574→  1274→function Row({ children }) {
+   575→  1275→  return <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "3px 0" }}>{children}</div>;
+   576→  1276→}
+   577→  1277→function Faint({ children }) {
+   578→  1278→  return <div style={{ fontSize: 11.5, color: COLORS.textFaint, marginBottom: 3 }}>{children}</div>;
+   579→  1279→}
+   580→  1280→function ThreatList({ label, counts }) {
+   581→  1281→  const entries = Object.entries(counts).filter(([, v]) => v > 0);
+   582→  1282→  return (
+   583→  1283→    <div>
+   584→  1284→      <Faint>{label}</Faint>
+   585→  1285→      {entries.length === 0 && <div style={{ fontSize: 11.5, color: COLORS.textFaint }}>None</div>}
+   586→  1286→      {entries.map(([k, v]) => (
+   587→  1287→        <div key={k} style={{ fontSize: 11.5, color: COLORS.text, display: "flex", justifyContent: "space-between" }}>
+   588→  1288→          <span>{k.replace(/_/g, " ").toLowerCase()}</span>
+   589→  1289→          <span style={{ fontVariantNumeric: "tabular-nums" }}>{v}</span>
+   590→  1290→        </div>
+   591→  1291→      ))}
+   592→  1292→    </div>
+   593→  1293→  );
+   594→  1294→}
+   595→  1295→
+   596→  1296→function SettingsPanel({ open, onClose, n, setN, winLen, setWinLen, mode, setMode, firstPlayer, setFirstPlayer, simulations, setSimulations, timeLimitMs, setTimeLimitMs, onTrain, training, trainResult, raveVisits }) {
+   597→  1297→  if (!open) return null;
+   598→  1298→  return (
+   599→  1299→    <div
+   600→  1300→      style={{ position: "absolute", inset: 0, background: "rgba(0,0,0,0.45)", zIndex: 20, display: "flex", justifyContent: "flex-end" }}
+   601→  1301→      onClick={onClose}
+   602→  1302→    >
+   603→  1303→      <div
+   604→  1304→        onClick={(e) => e.stopPropagation()}
+   605→  1305→        style={{ width: "min(360px, 92vw)", height: "100%", background: COLORS.panel, borderLeft: `1px solid ${COLORS.border}`, padding: 18, overflowY: "auto" }}
+   606→  1306→      >
+   607→  1307→        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+   608→  1308→          <span style={{ fontSize: 15, fontWeight: 600 }}>Settings</span>
+   609→  1309→          <button onClick={onClose} aria-label="Close settings" style={{ background: "none", border: "none", color: COLORS.textMuted, cursor: "pointer", minWidth: 40, minHeight: 40 }}>
+   610→  1310→            <X size={18} />
+   611→  1311→          </button>
+   612→  1312→        </div>
+   613→  1313→
+   614→  1314→        <SettingRow label="Mode">
+   615→  1315→          <div style={{ display: "flex", gap: 6 }}>
+   616→  1316→            {[
+   617→  1317→              ["classic", "Classic"],
+   618→  1318→              ["scoring", "Score Attack"],
+   619→  1319→            ].map(([val, lab]) => (
+   620→  1320→              <button
+   621→  1321→                key={val}
+   622→  1322→                onClick={() => setMode(val)}
+   623→  1323→                style={{
+   624→  1324→                  flex: 1,
+   625→  1325→                  padding: "8px 0",
+   626→  1326→                  minHeight: 40,
+   627→  1327→                  borderRadius: 8,
+   628→  1328→                  border: `1px solid ${mode === val ? COLORS.accent : COLORS.border}`,
+   629→  1329→                  background: mode === val ? COLORS.accent : COLORS.panelAlt,
+   630→  1330→                  color: "#fff",
+   631→  1331→                  fontSize: 13,
+   632→  1332→                  cursor: "pointer",
+   633→  1333→                }}
+   634→  1334→              >
+   635→  1335→                {lab}
+   636→  1336→              </button>
+   637→  1337→            ))}
+   638→  1338→          </div>
+   639→  1339→          <Faint>{mode === "classic" ? `First to connect ${winLen} wins.` : "Plays to a full board; most points wins."}</Faint>
+   640→  1340→        </SettingRow>
+   641→  1341→
+   642→  1342→        <SettingRow label={`Board size — ${n}×${n}`}>
+   643→  1343→          <input type="range" min={5} max={15} step={2} value={n} onChange={(e) => setN(Number(e.target.value))} style={{ width: "100%" }} />
+   644→  1344→        </SettingRow>
+   645→  1345→
+   646→  1346→        {mode === "classic" && (
+   647→  1347→          <SettingRow label={`Win length — ${winLen}`}>
+   648→  1348→            <input type="range" min={3} max={n} step={1} value={winLen} onChange={(e) => setWinLen(Number(e.target.value))} style={{ width: "100%" }} />
+   649→  1349→          </SettingRow>
+   650→  1350→        )}
+   651→  1351→
+   652→  1352→        <SettingRow label="Who plays first">
+   653→  1353→          <div style={{ display: "flex", gap: 6 }}>
+   654→  1354→            {[
+   655→  1355→              [1, "You"],
+   656→  1356→              [2, "AI"],
+   657→  1357→            ].map(([val, lab]) => (
+   658→  1358→              <button
+   659→  1359→                key={val}
+   660→  1360→                onClick={() => setFirstPlayer(val)}
+   661→  1361→                style={{
+   662→  1362→                  flex: 1,
+   663→  1363→                  padding: "8px 0",
+   664→  1364→                  minHeight: 40,
+   665→  1365→                  borderRadius: 8,
+   666→  1366→                  border: `1px solid ${firstPlayer === val ? COLORS.accent : COLORS.border}`,
+   667→  1367→                  background: firstPlayer === val ? COLORS.accent : COLORS.panelAlt,
+   668→  1368→                  color: "#fff",
+   669→  1369→                  fontSize: 13,
+   670→  1370→                  cursor: "pointer",
+   671→  1371→                }}
+   672→  1372→              >
+   673→  1373→                {lab}
+   674→  1374→              </button>
+   675→  1375→            ))}
+   676→  1376→          </div>
+   677→  1377→        </SettingRow>
+   678→  1378→
+   679→  1379→        <SettingRow label={`Thinking budget — ${simulations.toLocaleString()} sims, ${(timeLimitMs / 1000).toFixed(1)}s cap`}>
+   680→  1380→          <input type="range" min={200} max={6000} step={100} value={simulations} onChange={(e) => setSimulations(Number(e.target.value))} style={{ width: "100%" }} />
+   681→  1381→          <input type="range" min={300} max={3000} step={100} value={timeLimitMs} onChange={(e) => setTimeLimitMs(Number(e.target.value))} style={{ width: "100%", marginTop: 6 }} />
+   682→  1382→        </SettingRow>
+   683→  1383→
+   684→  1384→        <SettingRow label="Quick train">
+   685→  1385→          <Faint>Runs fast self-play games (no tree search) to seed this exact board size + mode before you play.</Faint>
+   686→  1386→          <div style={{ display: "flex", gap: 8, marginTop: 4 }}>
+   687→  1387→            <button
+   688→  1388→              onClick={() => onTrain(200)}
+   689→  1389→              disabled={training}
+   690→  1390→              style={{ flex: 1, padding: "9px 0", minHeight: 40, borderRadius: 8, border: `1px solid ${COLORS.border}`, background: COLORS.panelAlt, color: "#fff", cursor: training ? "default" : "pointer", opacity: training ? 0.6 : 1, fontSize: 13 }}
+   691→  1391→            >
+   692→  1392→              {training ? "Training…" : "Train 200 games"}
+   693→  1393→            </button>
+   694→  1394→          </div>
+   695→  1395→          {trainResult && (
+   696→  1396→            <Faint>
+   697→  1397→              Last run: P1 {trainResult.p1} · P2 {trainResult.p2} · draw {trainResult.draw}
+   698→  1398→            </Faint>
+   699→  1399→          )}
+   700→  1400→          <Faint>Table for this config: {Math.round(raveVisits).toLocaleString()} accumulated visits</Faint>
+   701→
+   702→[showing lines 701-1400 of 1801; use offset=1401 with limit to continue reading]

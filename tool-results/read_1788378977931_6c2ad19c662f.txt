@@ -1,0 +1,1801 @@
+     1→import React, { useState, useEffect, useRef, useCallback } from "react";
+     2→import { RotateCcw, Zap, Settings as SettingsIcon, X, ChevronUp, ChevronDown, Shield } from "lucide-react";
+     3→// ============================================================================
+     4→// CORE GAME LOGIC — pure functions, no UI, no browser APIs.
+     5→// Testable standalone (node), then imported verbatim into the React artifact.
+     6→// ============================================================================
+     7→
+     8→// ---------------------------------------------------------------------------
+     9→// Board primitives
+    10→// ---------------------------------------------------------------------------
+    11→export function emptyBoard(n) {
+    12→  return new Int8Array(n * n);
+    13→}
+    14→export function idx(n, r, c) {
+    15→  return r * n + c;
+    16→}
+    17→export function inBounds(n, r, c) {
+    18→  return r >= 0 && r < n && c >= 0 && c < n;
+    19→}
+    20→export function legalMoves(board) {
+    21→  const moves = [];
+    22→  for (let i = 0; i < board.length; i++) if (board[i] === 0) moves.push(i);
+    23→  return moves;
+    24→}
+    25→export function cloneBoard(board) {
+    26→  return board.slice();
+    27→}
+    28→
+    29→const DIRS = [
+    30→  [0, 1],
+    31→  [1, 0],
+    32→  [1, 1],
+    33→  [1, -1],
+    34→];
+    35→
+    36→// ---------------------------------------------------------------------------
+    37→// Win detection (Classic mode)
+    38→// ---------------------------------------------------------------------------
+    39→export function checkWinAt(board, n, winLen, r, c, player) {
+    40→  for (const [dr, dc] of DIRS) {
+    41→    let count = 1;
+    42→    let rr = r + dr,
+    43→      cc = c + dc;
+    44→    while (inBounds(n, rr, cc) && board[idx(n, rr, cc)] === player) {
+    45→      count++;
+    46→      rr += dr;
+    47→      cc += dc;
+    48→    }
+    49→    rr = r - dr;
+    50→    cc = c - dc;
+    51→    while (inBounds(n, rr, cc) && board[idx(n, rr, cc)] === player) {
+    52→      count++;
+    53→      rr -= dr;
+    54→      cc -= dc;
+    55→    }
+    56→    if (count >= winLen) return true;
+    57→  }
+    58→  return false;
+    59→}
+    60→
+    61→// ---------------------------------------------------------------------------
+    62→// Score Attack scoring — window-counting formula, verified earlier in this
+    63→// project (rule-learning demo). Ported unchanged, just re-indexed for a
+    64→// flat Int8Array board.
+    65→// ---------------------------------------------------------------------------
+    66→export const SCORE_WEIGHTS = {
+    67→  triple: 1,
+    68→  four: 5,
+    69→  five: 15,
+    70→  fullRow: 10,
+    71→  fullCol: 10,
+    72→  fullDiag: 20,
+    73→  cross: 3,
+    74→  linebreak: 2,
+    75→};
+    76→const SCORE_KEYS = Object.keys(SCORE_WEIGHTS);
+    77→
+    78→export function scoreMoveFeatures(board, n, row, col, player) {
+    79→  const opp = player === 1 ? 2 : 1;
+    80→  const feat = Object.fromEntries(SCORE_KEYS.map((k) => [k, 0]));
+    81→  let horiz3 = false,
+    82→    vert3 = false;
+    83→  for (const [dr, dc] of DIRS) {
+    84→    let left = 0,
+    85→      r = row - dr,
+    86→      c = col - dc;
+    87→    while (inBounds(n, r, c) && board[idx(n, r, c)] === player) {
+    88→      left++;
+    89→      r -= dr;
+    90→      c -= dc;
+    91→    }
+    92→    let right = 0;
+    93→    r = row + dr;
+    94→    c = col + dc;
+    95→    while (inBounds(n, r, c) && board[idx(n, r, c)] === player) {
+    96→      right++;
+    97→      r += dr;
+    98→      c += dc;
+    99→    }
+   100→    const runLen = left + 1 + right,
+   101→      offset = left;
+   102→    for (const [K, key] of [
+   103→      [3, "triple"],
+   104→      [4, "four"],
+   105→      [5, "five"],
+   106→    ]) {
+   107→      if (runLen >= K) {
+   108→        const startMin = Math.max(0, offset - (K - 1));
+   109→        const startMax = Math.min(offset, runLen - K);
+   110→        feat[key] += Math.max(0, startMax - startMin + 1);
+   111→      }
+   112→    }
+   113→    if (dr === 0 && dc === 1 && runLen >= 3) horiz3 = true;
+   114→    if (dr === 1 && dc === 0 && runLen >= 3) vert3 = true;
+   115→    const l1r = row - dr,
+   116→      l1c = col - dc,
+   117→      r1r = row + dr,
+   118→      r1c = col + dc;
+   119→    if (
+   120→      inBounds(n, l1r, l1c) &&
+   121→      inBounds(n, r1r, r1c) &&
+   122→      board[idx(n, l1r, l1c)] === opp &&
+   123→      board[idx(n, r1r, r1c)] === opp
+   124→    ) {
+   125→      feat.linebreak += 1;
+   126→    }
+   127→  }
+   128→  if (horiz3 && vert3) feat.cross = 1;
+   129→  const cellVal = (r, c) => (r === row && c === col ? player : board[idx(n, r, c)]);
+   130→  let fullRow = true;
+   131→  for (let c = 0; c < n; c++)
+   132→    if (cellVal(row, c) !== player) {
+   133→      fullRow = false;
+   134→      break;
+   135→    }
+   136→  let fullCol = true;
+   137→  for (let r = 0; r < n; r++)
+   138→    if (cellVal(r, col) !== player) {
+   139→      fullCol = false;
+   140→      break;
+   141→    }
+   142→  feat.fullRow = fullRow ? 1 : 0;
+   143→  feat.fullCol = fullCol ? 1 : 0;
+   144→  let fullDiag = 0;
+   145→  if (row === col) {
+   146→    let ok = true;
+   147→    for (let i = 0; i < n; i++)
+   148→      if (cellVal(i, i) !== player) {
+   149→        ok = false;
+   150→        break;
+   151→      }
+   152→    if (ok) fullDiag += 1;
+   153→  }
+   154→  if (row + col === n - 1) {
+   155→    let ok = true;
+   156→    for (let i = 0; i < n; i++)
+   157→      if (cellVal(i, n - 1 - i) !== player) {
+   158→        ok = false;
+   159→        break;
+   160→      }
+   161→    if (ok) fullDiag += 1;
+   162→  }
+   163→  feat.fullDiag = fullDiag;
+   164→  return feat;
+   165→}
+   166→
+   167→export function scoreMoveDelta(board, n, row, col, player) {
+   168→  const f = scoreMoveFeatures(board, n, row, col, player);
+   169→  return SCORE_KEYS.reduce((s, k) => s + f[k] * SCORE_WEIGHTS[k], 0);
+   170→}
+   171→
+   172→export function computeFullScore(board, n) {
+   173→  const totals = { 1: 0, 2: 0 };
+   174→  for (let p = 1; p <= 2; p++) {
+   175→    const seen = { triple: new Set(), four: new Set(), five: new Set() };
+   176→    for (let r = 0; r < n; r++) {
+   177→      for (let c = 0; c < n; c++) {
+   178→        if (board[idx(n, r, c)] !== p) continue;
+   179→        for (const [dr, dc] of DIRS) {
+   180→          for (const [K, key] of [
+   181→            [3, "triple"],
+   182→            [4, "four"],
+   183→            [5, "five"],
+   184→          ]) {
+   185→            let ok = true;
+   186→            const cells = [];
+   187→            for (let k = 0; k < K; k++) {
+   188→              const rr = r + dr * k,
+   189→                cc = c + dc * k;
+   190→              if (!inBounds(n, rr, cc) || board[idx(n, rr, cc)] !== p) {
+   191→                ok = false;
+   192→                break;
+   193→              }
+   194→              cells.push(idx(n, rr, cc));
+   195→            }
+   196→            if (ok) seen[key].add(cells.join(","));
+   197→          }
+   198→        }
+   199→      }
+   200→    }
+   201→    let total =
+   202→      seen.triple.size * SCORE_WEIGHTS.triple + seen.four.size * SCORE_WEIGHTS.four + seen.five.size * SCORE_WEIGHTS.five;
+   203→    for (let r = 0; r < n; r++) {
+   204→      for (let c = 0; c < n; c++) {
+   205→        if (board[idx(n, r, c)] !== p) continue;
+   206→        let h = false,
+   207→          v = false;
+   208→        for (const [dr, dc, flag] of [
+   209→          [0, 1, "h"],
+   210→          [1, 0, "v"],
+   211→        ]) {
+   212→          let left = 0,
+   213→            rr = r - dr,
+   214→            cc = c - dc;
+   215→          while (inBounds(n, rr, cc) && board[idx(n, rr, cc)] === p) {
+   216→            left++;
+   217→            rr -= dr;
+   218→            cc -= dc;
+   219→          }
+   220→          let right = 0;
+   221→          rr = r + dr;
+   222→          cc = c + dc;
+   223→          while (inBounds(n, rr, cc) && board[idx(n, rr, cc)] === p) {
+   224→            right++;
+   225→            rr += dr;
+   226→            cc += dc;
+   227→          }
+   228→          if (left + 1 + right >= 3) {
+   229→            if (flag === "h") h = true;
+   230→            else v = true;
+   231→          }
+   232→        }
+   233→        if (h && v) total += SCORE_WEIGHTS.cross;
+   234→      }
+   235→    }
+   236→    for (let r = 0; r < n; r++) {
+   237→      let full = true;
+   238→      for (let c = 0; c < n; c++)
+   239→        if (board[idx(n, r, c)] !== p) {
+   240→          full = false;
+   241→          break;
+   242→        }
+   243→      if (full) total += SCORE_WEIGHTS.fullRow;
+   244→    }
+   245→    for (let c = 0; c < n; c++) {
+   246→      let full = true;
+   247→      for (let r = 0; r < n; r++)
+   248→        if (board[idx(n, r, c)] !== p) {
+   249→          full = false;
+   250→          break;
+   251→        }
+   252→      if (full) total += SCORE_WEIGHTS.fullCol;
+   253→    }
+   254→    let mainOk = true;
+   255→    for (let i = 0; i < n; i++)
+   256→      if (board[idx(n, i, i)] !== p) {
+   257→        mainOk = false;
+   258→        break;
+   259→      }
+   260→    if (mainOk) total += SCORE_WEIGHTS.fullDiag;
+   261→    let antiOk = true;
+   262→    for (let i = 0; i < n; i++)
+   263→      if (board[idx(n, i, n - 1 - i)] !== p) {
+   264→        antiOk = false;
+   265→        break;
+   266→      }
+   267→    if (antiOk) total += SCORE_WEIGHTS.fullDiag;
+   268→    totals[p] = total;
+   269→  }
+   270→  return totals;
+   271→}
+   272→
+   273→// ---------------------------------------------------------------------------
+   274→// LAYER 0.5 — Threat Classifier
+   275→// For every empty cell + direction: "if I play here, what does this become?"
+   276→// ---------------------------------------------------------------------------
+   277→export const CAT = {
+   278→  NONE: 0,
+   279→  ONE: 1,
+   280→  TWO: 2,
+   281→  SIMPLE_THREE: 3,
+   282→  BROKEN_THREE: 4,
+   283→  OPEN_THREE: 5,
+   284→  SIMPLE_FOUR: 6,
+   285→  OPEN_FOUR: 7,
+   286→  WIN: 8,
+   287→};
+   288→export const CAT_NAME = {
+   289→  0: "None",
+   290→  1: "One",
+   291→  2: "Two",
+   292→  3: "Simple three",
+   293→  4: "Broken three",
+   294→  5: "Open three",
+   295→  6: "Simple four",
+   296→  7: "Open four",
+   297→  8: "Five — wins",
+   298→};
+   299→export const CAT_VALUE = { 0: 0, 1: 5, 2: 50, 3: 300, 4: 1200, 5: 3000, 6: 8000, 7: 20000, 8: 1000000 };
+   300→
+   301→function classifyDirection(board, n, row, col, dr, dc, player, winLen) {
+   302→  let left = 0,
+   303→    r = row - dr,
+   304→    c = col - dc;
+   305→  while (inBounds(n, r, c) && board[idx(n, r, c)] === player) {
+   306→    left++;
+   307→    r -= dr;
+   308→    c -= dc;
+   309→  }
+   310→  const leftOpen = inBounds(n, r, c) && board[idx(n, r, c)] === 0;
+   311→  let right = 0;
+   312→  r = row + dr;
+   313→  c = col + dc;
+   314→  while (inBounds(n, r, c) && board[idx(n, r, c)] === player) {
+   315→    right++;
+   316→    r += dr;
+   317→    c += dc;
+   318→  }
+   319→  const rightOpen = inBounds(n, r, c) && board[idx(n, r, c)] === 0;
+   320→  const runLen = left + 1 + right;
+   321→  const gap = winLen - runLen;
+   322→
+   323→  if (runLen >= winLen) return CAT.WIN;
+   324→  if (gap === 1) {
+   325→    if (leftOpen && rightOpen) return CAT.OPEN_FOUR;
+   326→    if (leftOpen || rightOpen) return CAT.SIMPLE_FOUR;
+   327→    return CAT.NONE;
+   328→  }
+   329→  if (gap === 2) {
+   330→    if (!leftOpen && !rightOpen) return CAT.NONE;
+   331→    if (leftOpen && rightOpen) {
+   332→      const leftExtendOpen = (() => {
+   333→        const rr = row - dr * (left + 2),
+   334→          cc = col - dc * (left + 2);
+   335→        return inBounds(n, rr, cc) && board[idx(n, rr, cc)] === 0;
+   336→      })();
+   337→      const rightExtendOpen = (() => {
+   338→        const rr = row + dr * (right + 2),
+   339→          cc = col + dc * (right + 2);
+   340→        return inBounds(n, rr, cc) && board[idx(n, rr, cc)] === 0;
+   341→      })();
+   342→      return leftExtendOpen || rightExtendOpen ? CAT.OPEN_THREE : CAT.BROKEN_THREE;
+   343→    }
+   344→    return CAT.SIMPLE_THREE;
+   345→  }
+   346→  if (gap === 3) return runLen >= 2 ? CAT.TWO : CAT.ONE;
+   347→  if (runLen >= 1) return CAT.ONE;
+   348→  return CAT.NONE;
+   349→}
+   350→
+   351→export function classifyCell(board, n, row, col, player, winLen) {
+   352→  let best = CAT.NONE,
+   353→    second = CAT.NONE,
+   354→    strongDirs = 0,
+   355→    bestDir = null;
+   356→  for (const [dr, dc] of DIRS) {
+   357→    const cat = classifyDirection(board, n, row, col, dr, dc, player, winLen);
+   358→    if (cat >= CAT.OPEN_THREE) strongDirs++;
+   359→    if (cat > best) {
+   360→      second = best;
+   361→      best = cat;
+   362→      bestDir = [dr, dc];
+   363→    } else if (cat > second) {
+   364→      second = cat;
+   365→    }
+   366→  }
+   367→  return {
+   368→    category: best,
+   369→    secondCategory: second,
+   370→    isFork: strongDirs >= 2,
+   371→    score: CAT_VALUE[best] + 0.3 * CAT_VALUE[second],
+   372→    direction: bestDir,
+   373→  };
+   374→}
+   375→
+   376→export function classifyBoard(board, n, player, winLen) {
+   377→  const out = new Map();
+   378→  for (let i = 0; i < board.length; i++) {
+   379→    if (board[i] !== 0) continue;
+   380→    const row = Math.floor(i / n),
+   381→      col = i % n;
+   382→    out.set(i, classifyCell(board, n, row, col, player, winLen));
+   383→  }
+   384→  return out;
+   385→}
+   386→
+   387→// Signed static eval: POSITIVE always means the human player is ahead.
+   388→// This exact sign was inverted for a long time in the reference project
+   389→// (rebuild-spec bug #15) — kept as one single, explicit, tested formula.
+   390→export function evaluatePosition(board, n, winLen) {
+   391→  function sideTotal(player) {
+   392→    let total = 0;
+   393→    for (let i = 0; i < board.length; i++) {
+   394→      if (board[i] !== 0) continue;
+   395→      const row = Math.floor(i / n),
+   396→        col = i % n;
+   397→      const c = classifyCell(board, n, row, col, player, winLen);
+   398→      total += CAT_VALUE[c.category] * 0.001 + CAT_VALUE[c.secondCategory] * 0.0003;
+   399→    }
+   400→    return total;
+   401→  }
+   402→  const playerTotal = sideTotal(1);
+   403→  const aiTotal = sideTotal(2);
+   404→  const diff = playerTotal - aiTotal;
+   405→  return { raw: diff, display: Math.max(-100, Math.min(100, Math.round(Math.tanh(diff / 40) * 100))) };
+   406→}
+   407→
+   408→// ---------------------------------------------------------------------------
+   409→// Tactical safety net
+   410→// ---------------------------------------------------------------------------
+   411→export function tacticalMove(board, n, winLen, me, opp) {
+   412→  const myCells = classifyBoard(board, n, me, winLen);
+   413→  const oppCells = classifyBoard(board, n, opp, winLen);
+   414→
+   415→  for (const [cell, c] of myCells) if (c.category === CAT.WIN) return { cell, reason: "win" };
+   416→  for (const [cell, c] of oppCells) if (c.category === CAT.WIN) return { cell, reason: "block-win" };
+   417→  for (const [cell, c] of myCells) if (c.category === CAT.OPEN_FOUR) return { cell, reason: "open-four" };
+   418→  for (const [cell, c] of oppCells) if (c.category === CAT.SIMPLE_FOUR) return { cell, reason: "block-four" };
+   419→  for (const [cell, c] of oppCells) if (c.category === CAT.OPEN_FOUR) return { cell, reason: "block-open-four" };
+   420→  let bestFork = null;
+   421→  for (const [cell, c] of myCells) {
+   422→    if (c.isFork && (!bestFork || c.score > bestFork.score)) bestFork = { cell, score: c.score };
+   423→  }
+   424→  if (bestFork) return { cell: bestFork.cell, reason: "fork" };
+   425→  for (const [cell, c] of oppCells) if (c.category === CAT.OPEN_THREE) return { cell, reason: "block-open-three" };
+   426→  return null;
+   427→}
+   428→
+   429→// ---------------------------------------------------------------------------
+   430→// GlobalRAVE — per-(boardSize,mode) cross-move / cross-game memory.
+   431→// ---------------------------------------------------------------------------
+   432→export class GlobalRAVE {
+   433→  constructor(n) {
+   434→    this.n = n;
+   435→    this.visits = { 1: new Float64Array(n * n), 2: new Float64Array(n * n) };
+   436→    this.wins = { 1: new Float64Array(n * n), 2: new Float64Array(n * n) };
+   437→  }
+   438→  update(player, cell, reward) {
+   439→    this.visits[player][cell] += 1;
+   440→    this.wins[player][cell] += reward;
+   441→  }
+   442→  getRate(player, cell) {
+   443→    const v = this.visits[player][cell];
+   444→    return v === 0 ? 0.5 : this.wins[player][cell] / v;
+   445→  }
+   446→  getVisits(player, cell) {
+   447→    return this.visits[player][cell];
+   448→  }
+   449→  decay(factor) {
+   450→    for (const p of [1, 2]) {
+   451→      for (let i = 0; i < this.visits[p].length; i++) {
+   452→        this.visits[p][i] *= factor;
+   453→        this.wins[p][i] *= factor;
+   454→      }
+   455→    }
+   456→  }
+   457→  totalVisits() {
+   458→    let t = 0;
+   459→    for (const p of [1, 2]) for (let i = 0; i < this.visits[p].length; i++) t += this.visits[p][i];
+   460→    return Math.round(t);
+   461→  }
+   462→  toJSON() {
+   463→    return {
+   464→      n: this.n,
+   465→      v1: Array.from(this.visits[1]),
+   466→      v2: Array.from(this.visits[2]),
+   467→      w1: Array.from(this.wins[1]),
+   468→      w2: Array.from(this.wins[2]),
+   469→    };
+   470→  }
+   471→  static fromJSON(obj) {
+   472→    const g = new GlobalRAVE(obj.n);
+   473→    g.visits[1] = Float64Array.from(obj.v1);
+   474→    g.visits[2] = Float64Array.from(obj.v2);
+   475→    g.wins[1] = Float64Array.from(obj.w1);
+   476→    g.wins[2] = Float64Array.from(obj.w2);
+   477→    return g;
+   478→  }
+   479→}
+   480→
+   481→// ---------------------------------------------------------------------------
+   482→// MCTS + RAVE
+   483→// RAVE signal is read directly from the persistent GlobalRAVE table at every
+   484→// node (root and internal) rather than maintained as a second, separate
+   485→// per-node bookkeeping structure — simpler, and consistent with this
+   486→// project's actual design (the global table IS the RAVE source of truth,
+   487→// including inside playouts; see rebuild-spec Part B.2).
+   488→// ---------------------------------------------------------------------------
+   489→function mulberry32(seed) {
+   490→  let s = seed;
+   491→  return function () {
+   492→    s |= 0;
+   493→    s = (s + 0x6d2b79f5) | 0;
+   494→    let t = Math.imul(s ^ (s >>> 15), 1 | s);
+   495→    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+   496→    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+   497→  };
+   498→}
+   499→
+   500→class MCTSNode {
+   501→  constructor(player) {
+   502→    this.player = player; // player about to move AT this node
+   503→    this.children = new Map();
+   504→    this.untried = null;
+   505→    this.visits = 0;
+   506→    this.wins = 0; // see backprop convention below
+   507→  }
+   508→}
+   509→
+   510→function raveBeta(visits, C = 220) {
+   511→  return Math.sqrt(C / (3 * visits + C));
+   512→}
+   513→
+   514→function pickPlayoutMove(board, n, winLen, mode, player, opp, globalRave, rng) {
+   515→  const tac = tacticalMove(board, n, winLen, player, opp);
+   516→  if (tac) return tac.cell;
+   517→  const moves = legalMoves(board);
+   518→  if (!moves.length) return null;
+   519→  const weights = [];
+   520→  let sum = 0;
+   521→  for (const cell of moves) {
+   522→    const row = Math.floor(cell / n),
+   523→      col = cell % n;
+   524→    let w;
+   525→    if (mode === "classic") {
+   526→      const c = classifyCell(board, n, row, col, player, winLen);
+   527→      w = 1 + c.score * 0.02;
+   528→    } else {
+   529→      w = 1 + scoreMoveDelta(board, n, row, col, player) * 3 + scoreMoveDelta(board, n, row, col, opp) * 1.5;
+   530→    }
+   531→    w *= 0.6 + 0.8 * globalRave.getRate(player, cell);
+   532→    weights.push(w);
+   533→    sum += w;
+   534→  }
+   535→  let x = rng() * sum;
+   536→  for (let i = 0; i < moves.length; i++) {
+   537→    x -= weights[i];
+   538→    if (x <= 0) return moves[i];
+   539→  }
+   540→  return moves[moves.length - 1];
+   541→}
+   542→
+   543→function runPlayout(board, n, winLen, mode, startPlayer, globalRave, rng, maxMoves) {
+   544→  const work = cloneBoard(board);
+   545→  let player = startPlayer;
+   546→  const played = [];
+   547→  let winner = 0;
+   548→  let moves = 0;
+   549→  while (moves < maxMoves) {
+   550→    const opp = player === 1 ? 2 : 1;
+   551→    const cell = pickPlayoutMove(work, n, winLen, mode, player, opp, globalRave, rng);
+   552→    if (cell === null) break;
+   553→    const row = Math.floor(cell / n),
+   554→      col = cell % n;
+   555→    work[cell] = player;
+   556→    played.push({ player, cell });
+   557→    if (mode === "classic" && checkWinAt(work, n, winLen, row, col, player)) {
+   558→      winner = player;
+   559→      break;
+   560→    }
+   561→    player = opp;
+   562→    moves++;
+   563→  }
+   564→  let scoreDiff = 0;
+   565→  if (mode === "scoring" && legalMoves(work).length === 0) {
+   566→    const totals = computeFullScore(work, n);
+   567→    scoreDiff = totals[1] - totals[2];
+   568→  }
+   569→  return { played, winner, scoreDiff };
+   570→}
+   571→
+   572→// ---------------------------------------------------------------------------
+   573→// Quick Train — fast self-play using the SAME lightweight policy playouts
+   574→// use (tactical overrides + threat/score-weighted softmax), with NO tree
+   575→// search. This is intentionally cheap so hundreds of games can run in a
+   576→// fraction of a second, purely to seed GlobalRAVE before real play.
+   577→// Historical bug to avoid (rebuild-spec bug #4): training must apply ZERO
+   578→// decay, and playouts must be genuinely randomized, not greedy — both are
+   579→// true here because this reuses the exact same runPlayout used inside MCTS.
+   580→// ---------------------------------------------------------------------------
+   581→export function trainGames(n, winLen, mode, count, globalRave, seedBase = 1) {
+   582→  const rng = mulberry32(seedBase);
+   583→  const outcomes = { p1: 0, p2: 0, draw: 0 };
+   584→  for (let g = 0; g < count; g++) {
+   585→    const board = emptyBoard(n);
+   586→    const pl = runPlayout(board, n, winLen, mode, 1, globalRave, rng, n * n + 2);
+   587→    let reward1; // outcome from player 1's perspective, in [0,1]
+   588→    if (mode === "classic") {
+   589→      reward1 = pl.winner === 1 ? 1 : pl.winner === 2 ? 0 : 0.5;
+   590→      if (pl.winner === 1) outcomes.p1++;
+   591→      else if (pl.winner === 2) outcomes.p2++;
+   592→      else outcomes.draw++;
+   593→    } else {
+   594→      reward1 = 1 / (1 + Math.exp(-pl.scoreDiff / Math.max(4, n)));
+   595→      if (pl.scoreDiff > 0) outcomes.p1++;
+   596→      else if (pl.scoreDiff < 0) outcomes.p2++;
+   597→      else outcomes.draw++;
+   598→    }
+   599→    // THIS is the step that was missing — runPlayout only returns the move
+   600→    // list, it doesn't update GlobalRAVE itself (that happens in the
+   601→    // caller in runMCTS's simulation step, which trainGames bypasses by
+   602→    // calling runPlayout directly). Do it explicitly here.
+   603→    for (const mv of pl.played) {
+   604→      const r = mv.player === 1 ? reward1 : 1 - reward1;
+   605→      globalRave.update(mv.player, mv.cell, r);
+   606→    }
+   607→  }
+   608→  return outcomes;
+   609→}
+   610→
+   611→export function runMCTS(opts) {
+   612→  const {
+   613→    board,
+   614→    n,
+   615→    winLen,
+   616→    mode,
+   617→    aiPlayer,
+   618→    simulations = 1500,
+   619→    timeLimitMs = 1500,
+   620→    globalRave,
+   621→    seed = 1,
+   622→    priorWeight = 0.9,
+   623→  } = opts;
+   624→  const rng = mulberry32(seed);
+   625→  const humanPlayer = aiPlayer === 1 ? 2 : 1;
+   626→  const root = new MCTSNode(aiPlayer);
+   627→  root.untried = legalMoves(board);
+   628→
+   629→  const threatPrior = mode === "classic" ? classifyBoard(board, n, aiPlayer, winLen) : null;
+   630→  const threatPriorOpp = mode === "classic" ? classifyBoard(board, n, humanPlayer, winLen) : null;
+   631→
+   632→  const start = Date.now();
+   633→  let sims = 0;
+   634→  for (; sims < simulations; sims++) {
+   635→    if ((sims & 31) === 0 && Date.now() - start > timeLimitMs) break;
+   636→
+   637→    // ---- Selection ----
+   638→    let node = root;
+   639→    const state = cloneBoard(board);
+   640→    const path = [node];
+   641→    let curPlayer = aiPlayer;
+   642→    let terminal = false;
+   643→    let terminalWinner = 0;
+   644→
+   645→    while (node.untried && node.untried.length === 0 && node.children.size > 0) {
+   646→      let bestCell = null,
+   647→        bestScore = -Infinity;
+   648→      for (const [cell, child] of node.children) {
+   649→        if (state[cell] !== 0) continue; // occupied-cell guard
+   650→        const q = child.visits > 0 ? child.wins / child.visits : 0.5;
+   651→        const uct = q + Math.SQRT2 * Math.sqrt(Math.log(node.visits + 1) / (child.visits + 1e-6));
+   652→        const rv = globalRave.getVisits(node.player, cell);
+   653→        const raveRate = globalRave.getRate(node.player, cell);
+   654→        const beta = rv > 0 ? raveBeta(child.visits) : 0;
+   655→        let score = beta * raveRate + (1 - beta) * uct;
+   656→        if (node === root && threatPrior) {
+   657→          const tp = curPlayer === aiPlayer ? threatPrior : threatPriorOpp;
+   658→          const t = tp.get(cell);
+   659→          if (t) {
+   660→            const norm = Math.min(1, t.score / CAT_VALUE[CAT.OPEN_FOUR]);
+   661→            score += (priorWeight * norm * Math.sqrt(Math.log(node.visits + 2))) / (child.visits + 8);
+   662→          }
+   663→        }
+   664→        if (score > bestScore) {
+   665→          bestScore = score;
+   666→          bestCell = cell;
+   667→        }
+   668→      }
+   669→      if (bestCell === null) break;
+   670→      state[bestCell] = curPlayer;
+   671→      const row = Math.floor(bestCell / n),
+   672→        col = bestCell % n;
+   673→      if (mode === "classic" && checkWinAt(state, n, winLen, row, col, curPlayer)) {
+   674→        terminal = true;
+   675→        terminalWinner = curPlayer;
+   676→      }
+   677→      node = node.children.get(bestCell);
+   678→      path.push(node);
+   679→      curPlayer = curPlayer === 1 ? 2 : 1;
+   680→      if (terminal || legalMoves(state).length === 0) break;
+   681→    }
+   682→
+   683→    // ---- Expansion ----
+   684→    if (!terminal && legalMoves(state).length > 0) {
+   685→      if (node.untried === null) node.untried = legalMoves(state);
+   686→      node.untried = node.untried.filter((c) => state[c] === 0);
+   687→      if (node.untried.length > 0) {
+   688→        const i = Math.floor(rng() * node.untried.length);
+   689→        const cell = node.untried[i];
+   690→        node.untried.splice(i, 1);
+   691→        state[cell] = curPlayer;
+   692→        const row = Math.floor(cell / n),
+   693→          col = cell % n;
+   694→        const child = new MCTSNode(curPlayer === 1 ? 2 : 1);
+   695→        node.children.set(cell, child);
+   696→        if (mode === "classic" && checkWinAt(state, n, winLen, row, col, curPlayer)) {
+   697→          terminal = true;
+   698→          terminalWinner = curPlayer;
+   699→        }
+   700→        node = child;
+   701→        path.push(node);
+   702→        curPlayer = curPlayer === 1 ? 2 : 1;
+   703→      }
+   704→    }
+   705→
+   706→    // ---- Simulation ----
+   707→    let reward1; // outcome from PLAYER 1's perspective, in [0,1]
+   708→    let playoutMoves = [];
+   709→    if (terminal) {
+   710→      reward1 = terminalWinner === 1 ? 1 : 0;
+   711→    } else if (legalMoves(state).length === 0 && mode === "classic") {
+   712→      reward1 = 0.5;
+   713→    } else {
+   714→      const pl = runPlayout(state, n, winLen, mode, curPlayer, globalRave, rng, n * n + 2);
+   715→      playoutMoves = pl.played;
+   716→      if (mode === "classic") {
+   717→        reward1 = pl.winner === 0 ? 0.5 : pl.winner === 1 ? 1 : 0;
+   718→      } else {
+   719→        reward1 = 1 / (1 + Math.exp(-pl.scoreDiff / Math.max(4, n)));
+   720→      }
+   721→    }
+   722→    for (const mv of playoutMoves) {
+   723→      const r = mv.player === 1 ? reward1 : 1 - reward1;
+   724→      globalRave.update(mv.player, mv.cell, r);
+   725→    }
+   726→
+   727→    // ---- Backprop ----
+   728→    // Root always tracks value FOR aiPlayer (what "rootWinRate" reports).
+   729→    path[0].visits += 1;
+   730→    path[0].wins += aiPlayer === 1 ? reward1 : 1 - reward1;
+   731→    // Every descendant tracks value for whoever MOVED to reach it, i.e.
+   732→    // its parent's `.player` (the mover at the parent, which is exactly
+   733→    // who selection compares children on behalf of).
+   734→    for (let i = 1; i < path.length; i++) {
+   735→      const moverToReachThis = path[i - 1].player;
+   736→      path[i].visits += 1;
+   737→      path[i].wins += moverToReachThis === 1 ? reward1 : 1 - reward1;
+   738→    }
+   739→  }
+   740→
+   741→  let bestCell = null,
+   742→    bestVisits = -1;
+   743→  const rootChildren = [];
+   744→  for (const [cell, child] of root.children) {
+   745→    if (board[cell] !== 0) continue;
+   746→    rootChildren.push({ cell, visits: child.visits, winRate: child.visits > 0 ? child.wins / child.visits : 0 });
+   747→    if (child.visits > bestVisits) {
+   748→      bestVisits = child.visits;
+   749→      bestCell = cell;
+   750→    }
+   751→  }
+   752→  rootChildren.sort((a, b) => b.visits - a.visits);
+   753→
+   754→  const override = tacticalMove(board, n, winLen, aiPlayer, humanPlayer);
+   755→  if (override && board[override.cell] === 0) bestCell = override.cell;
+   756→  if (bestCell === null || board[bestCell] !== 0) {
+   757→    const lm = legalMoves(board);
+   758→    bestCell = lm[Math.floor(rng() * lm.length)];
+   759→  }
+   760→
+   761→  const rootWinRate = root.visits > 0 ? root.wins / root.visits : 0.5;
+   762→  return {
+   763→    move: bestCell,
+   764→    reason: override ? override.reason : "search",
+   765→    simulations: sims,
+   766→    elapsedMs: Date.now() - start,
+   767→    rootWinRate,
+   768→    raveBeta: raveBeta(root.visits),
+   769→    topChildren: rootChildren.slice(0, 6),
+   770→    totalVisits: root.visits,
+   771→  };
+   772→}
+   773→
+   774→// ============================================================================
+   775→// REACT UI LAYER
+   776→// ============================================================================
+   777→const COLORS = {
+   778→  app: "#14171c",
+   779→  panel: "#1b2028",
+   780→  panelAlt: "#212832",
+   781→  border: "#2b323d",
+   782→  text: "#e9ecf1",
+   783→  textMuted: "#8b95a5",
+   784→  textFaint: "#5b6472",
+   785→  boardFrame: "#4a3626",
+   786→  cell: "#d9ab5f",
+   787→  cellLine: "#5f4a30",
+   788→  stone1: "#f2ead8",
+   789→  stone1Ring: "#c2b190",
+   790→  stone2: "#20242a",
+   791→  accent: "#3f8f5f",
+   792→  accentHover: "#4aa26b",
+   793→  alert: "#c0483f",
+   794→  amber: "#c98a3b",
+   795→};
+   796→
+   797→const CAT_COLOR = {
+   798→  0: COLORS.textFaint,
+   799→  1: COLORS.textFaint,
+   800→  2: COLORS.textFaint,
+   801→  3: COLORS.textMuted,
+   802→  4: COLORS.amber,
+   803→  5: COLORS.amber,
+   804→  6: COLORS.alert,
+   805→  7: COLORS.alert,
+   806→  8: COLORS.alert,
+   807→};
+   808→
+   809→function colLabel(c) {
+   810→  return String.fromCharCode(65 + c);
+   811→}
+   812→function rowLabel(r, n) {
+   813→  return n - r;
+   814→}
+   815→function cellLabel(cell, n) {
+   816→  return colLabel(cell % n) + rowLabel(Math.floor(cell / n), n);
+   817→}
+   818→
+   819→function freshGame(n, firstPlayer) {
+   820→  return {
+   821→    board: emptyBoard(n),
+   822→    player: firstPlayer,
+   823→    status: "playing",
+   824→    winner: 0,
+   825→    moveHistory: [],
+   826→    scores: { 1: 0, 2: 0 },
+   827→  };
+   828→}
+   829→
+   830→const REASON_TEXT = {
+   831→  win: "Completes a winning line.",
+   832→  "block-win": "Blocking your winning line — one more move and you'd have won.",
+   833→  "open-four": "Creates an open four — unstoppable next turn from either end.",
+   834→  "block-four": "Blocking your simple four before it could complete.",
+   835→  "block-open-four": "Trying to slow an open four — it likely can't be fully stopped now.",
+   836→  fork: "Creates a fork — two live threats at once, so only one can be blocked.",
+   837→  "block-open-three": "Blocking your open three before it becomes an open four.",
+   838→  search: "No forcing move available — playing the strongest position the search found.",
+   839→};
+   840→
+   841→function countThreats(board, n, player, winLen) {
+   842→  const keys = ["SIMPLE_THREE", "BROKEN_THREE", "OPEN_THREE", "SIMPLE_FOUR", "OPEN_FOUR"];
+   843→  const counts = Object.fromEntries(keys.map((k) => [k, 0]));
+   844→  const cells = classifyBoard(board, n, player, winLen);
+   845→  for (const [, c] of cells) {
+   846→    for (const k of keys) if (CAT[k] === c.category) counts[k]++;
+   847→  }
+   848→  return counts;
+   849→}
+   850→
+   851→function buildScoringAnalysis(board, n, scores) {
+   852→  const remaining = legalMoves(board).length;
+   853→  const filled = n * n - remaining;
+   854→  const fillPct = Math.round((filled / (n * n)) * 100);
+   855→  const halfFilled = Math.max(1, filled / 2);
+   856→  const playerPace = scores[1] / halfFilled;
+   857→  const aiPace = scores[2] / halfFilled;
+   858→  const halfRemaining = remaining / 2;
+   859→  const projPlayer = Math.round(scores[1] + playerPace * halfRemaining);
+   860→  const projAi = Math.round(scores[2] + aiPace * halfRemaining);
+   861→
+   862→  const playerMoves = legalMoves(board)
+   863→    .map((cell) => {
+   864→      const row = Math.floor(cell / n),
+   865→        col = cell % n;
+   866→      return { cell, delta: scoreMoveDelta(board, n, row, col, 1) };
+   867→    })
+   868→    .filter((m) => m.delta > 0)
+   869→    .sort((a, b) => b.delta - a.delta)
+   870→    .slice(0, 5);
+   871→
+   872→  const aiThreats = legalMoves(board)
+   873→    .map((cell) => {
+   874→      const row = Math.floor(cell / n),
+   875→        col = cell % n;
+   876→      return { cell, delta: scoreMoveDelta(board, n, row, col, 2) };
+   877→    })
+   878→    .filter((m) => m.delta > 0)
+   879→    .sort((a, b) => b.delta - a.delta)
+   880→    .slice(0, 5);
+   881→
+   882→  return { remaining, fillPct, playerPace, aiPace, projPlayer, projAi, playerMoves, aiThreats };
+   883→}
+   884→
+   885→function buildAnalysis(board, n, winLen, mode, mctsResult, scores) {
+   886→  const ev = evaluatePosition(board, n, winLen);
+   887→  const aiWinPctRaw = Math.round(mctsResult.rootWinRate * 100);
+   888→  const aiWinPct = Math.max(0, Math.min(100, aiWinPctRaw));
+   889→  const playerWinPct = 100 - aiWinPct; // derive, never round both independently (bug #17)
+   890→
+   891→  const humanCells = classifyBoard(board, n, 1, winLen);
+   892→  const humanOptions = [...humanCells.entries()]
+   893→    .filter(([, c]) => c.category > CAT.NONE)
+   894→    .sort((a, b) => b[1].score - a[1].score)
+   895→    .slice(0, 5)
+   896→    .map(([cell, c]) => ({ cell, category: c.category, isFork: c.isFork }));
+   897→
+   898→  const threats = { player: countThreats(board, n, 1, winLen), ai: countThreats(board, n, 2, winLen) };
+   899→
+   900→  return {
+   901→    eval: ev,
+   902→    playerWinPct,
+   903→    aiWinPct,
+   904→    aiReasonCell: mctsResult.move,
+   905→    aiReason: mctsResult.reason,
+   906→    humanOptions,
+   907→    aiConsidered: mctsResult.topChildren,
+   908→    threats,
+   909→    mcts: {
+   910→      simulations: mctsResult.simulations,
+   911→      elapsedMs: mctsResult.elapsedMs,
+   912→      raveBeta: mctsResult.raveBeta,
+   913→      totalVisits: mctsResult.totalVisits,
+   914→    },
+   915→    scoring: mode === "scoring" ? buildScoringAnalysis(board, n, scores) : null,
+   916→  };
+   917→}
+   918→
+   919→// ---------------------------------------------------------------------------
+   920→// Small building blocks
+   921→// ---------------------------------------------------------------------------
+   922→function IconBtn({ onClick, title, icon, label, active, disabled }) {
+   923→  return (
+   924→    <button
+   925→      onClick={onClick}
+   926→      title={title}
+   927→      aria-label={title}
+   928→      disabled={disabled}
+   929→      style={{
+   930→        display: "inline-flex",
+   931→        alignItems: "center",
+   932→        gap: 6,
+   933→        padding: "8px 12px",
+   934→        minHeight: 40,
+   935→        borderRadius: 8,
+   936→        background: active ? COLORS.accent : COLORS.panelAlt,
+   937→        color: active ? "#fff" : COLORS.text,
+   938→        border: `1px solid ${active ? COLORS.accent : COLORS.border}`,
+   939→        fontSize: 13.5,
+   940→        fontWeight: 500,
+   941→        cursor: disabled ? "default" : "pointer",
+   942→        opacity: disabled ? 0.5 : 1,
+   943→        whiteSpace: "nowrap",
+   944→      }}
+   945→    >
+   946→      {icon}
+   947→      <span className="ibtn-label">{label}</span>
+   948→    </button>
+   949→  );
+   950→}
+   951→
+   952→function EvalBar({ playerPct, aiPct, thinking, mode, scores }) {
+   953→  const playerFrac = mode === "scoring" ? (scores[1] + scores[2] > 0 ? scores[1] / (scores[1] + scores[2]) : 0.5) : playerPct / 100;
+   954→  return (
+   955→    <div style={{ width: 26, display: "flex", flexDirection: "column", alignItems: "center", opacity: thinking ? 0.35 : 1, transition: "opacity 160ms" }}>
+   956→      <div style={{ fontSize: 10.5, color: COLORS.textFaint, marginBottom: 4, fontVariantNumeric: "tabular-nums" }}>
+   957→        {mode === "scoring" ? scores[2] : Math.round(100 - playerFrac * 100) + "%"}
+   958→      </div>
+   959→      <div style={{ flex: 1, width: 16, borderRadius: 8, overflow: "hidden", background: COLORS.stone2, display: "flex", flexDirection: "column-reverse", position: "relative" }}>
+   960→        <div style={{ height: `${Math.max(2, Math.min(98, playerFrac * 100))}%`, background: COLORS.accent, transition: "height 260ms ease" }} />
+   961→        {thinking && (
+   962→          <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center" }}>
+   963→            <div style={{ width: 8, height: 8, borderRadius: "50%", background: "#fff", animation: "pulseDot 1s infinite" }} />
+   964→          </div>
+   965→        )}
+   966→      </div>
+   967→      <div style={{ fontSize: 10.5, color: COLORS.textFaint, marginTop: 4, fontVariantNumeric: "tabular-nums" }}>
+   968→        {mode === "scoring" ? scores[1] : Math.round(playerFrac * 100) + "%"}
+   969→      </div>
+   970→    </div>
+   971→  );
+   972→}
+   973→
+   974→function Board({ n, board, onCellClick, disabled, lastMove, sizePx }) {
+   975→  const cellPx = sizePx / n;
+   976→  return (
+   977→    <div style={{ background: COLORS.boardFrame, borderRadius: 10, padding: Math.max(6, cellPx * 0.18), display: "inline-block" }}>
+   978→      <div style={{ display: "flex" }}>
+   979→        <div style={{ display: "flex", flexDirection: "column", marginRight: 4 }}>
+   980→          {Array.from({ length: n }, (_, r) => (
+   981→            <div key={r} style={{ height: cellPx, display: "flex", alignItems: "center", justifyContent: "flex-end", fontSize: Math.max(9, cellPx * 0.28), color: COLORS.text, opacity: 0.65, width: 16, fontVariantNumeric: "tabular-nums" }}>
+   982→              {rowLabel(r, n)}
+   983→            </div>
+   984→          ))}
+   985→        </div>
+   986→        <div>
+   987→          <div
+   988→            style={{
+   989→              display: "grid",
+   990→              gridTemplateColumns: `repeat(${n}, ${cellPx}px)`,
+   991→              gridTemplateRows: `repeat(${n}, ${cellPx}px)`,
+   992→              gap: 1,
+   993→              background: COLORS.cellLine,
+   994→            }}
+   995→          >
+   996→            {Array.from(board).map((val, i) => {
+   997→              const isLast = lastMove === i;
+   998→              return (
+   999→                <button
+  1000→                  key={i}
+  1001→                  onClick={() => onCellClick(i)}
+  1002→                  disabled={disabled || val !== 0}
+  1003→                  style={{
+  1004→                    width: cellPx,
+  1005→                    height: cellPx,
+  1006→                    background: COLORS.cell,
+  1007→                    border: "none",
+  1008→                    padding: 0,
+  1009→                    display: "flex",
+  1010→                    alignItems: "center",
+  1011→                    justifyContent: "center",
+  1012→                    cursor: disabled || val !== 0 ? "default" : "pointer",
+  1013→                  }}
+  1014→                >
+  1015→                  {val !== 0 && (
+  1016→                    <div
+  1017→                      style={{
+  1018→                        width: cellPx - Math.max(4, cellPx * 0.16),
+  1019→                        height: cellPx - Math.max(4, cellPx * 0.16),
+  1020→                        borderRadius: "50%",
+  1021→                        background: val === 1 ? COLORS.stone1 : COLORS.stone2,
+  1022→                        boxShadow:
+  1023→                          val === 1
+  1024→                            ? `inset 0 0 0 1px ${COLORS.stone1Ring}, 0 1px 2px rgba(0,0,0,.35)${isLast ? `, 0 0 0 2px ${COLORS.accent}` : ""}`
+  1025→                            : `0 1px 2px rgba(0,0,0,.5)${isLast ? `, 0 0 0 2px ${COLORS.accent}` : ""}`,
+  1026→                    }}
+  1027→                  />
+  1028→                  )}
+  1029→                </button>
+  1030→              );
+  1031→            })}
+  1032→          </div>
+  1033→          <div style={{ display: "grid", gridTemplateColumns: `repeat(${n}, ${cellPx}px)`, marginTop: 4 }}>
+  1034→            {Array.from({ length: n }, (_, c) => (
+  1035→              <div key={c} style={{ textAlign: "center", fontSize: Math.max(9, cellPx * 0.28), color: COLORS.text, opacity: 0.65, fontVariantNumeric: "tabular-nums" }}>
+  1036→                {colLabel(c)}
+  1037→              </div>
+  1038→            ))}
+  1039→          </div>
+  1040→        </div>
+  1041→      </div>
+  1042→    </div>
+  1043→  );
+  1044→}
+  1045→
+  1046→function CategoryChip({ category, isFork }) {
+  1047→  return (
+  1048→    <span
+  1049→      style={{
+  1050→        fontSize: 11,
+  1051→        padding: "2px 7px",
+  1052→        borderRadius: 999,
+  1053→        color: "#fff",
+  1054→        background: CAT_COLOR[category],
+  1055→        whiteSpace: "nowrap",
+  1056→      }}
+  1057→    >
+  1058→      {isFork ? "Fork" : CAT_NAME[category]}
+  1059→    </span>
+  1060→  );
+  1061→}
+  1062→
+  1063→function AnalysisPanel({ analysis, n, mode, expanded, onEnter, onLeave, onTap, peekDurationMs, setPeekDurationMs, thinking }) {
+  1064→  if (!analysis) {
+  1065→    return (
+  1066→      <div
+  1067→        onMouseEnter={onEnter}
+  1068→        onMouseLeave={onLeave}
+  1069→        onClick={onTap}
+  1070→        style={{
+  1071→          position: "absolute",
+  1072→          left: 0,
+  1073→          right: 0,
+  1074→          bottom: 0,
+  1075→          textAlign: "center",
+  1076→          padding: "8px 0",
+  1077→          fontSize: 12,
+  1078→          color: COLORS.textFaint,
+  1079→          cursor: "pointer",
+  1080→        }}
+  1081→      >
+  1082→        Play a move to see analysis
+  1083→      </div>
+  1084→    );
+  1085→  }
+  1086→  const ev = analysis.eval;
+  1087→  const evColor = ev.raw > 8 ? COLORS.accent : ev.raw < -8 ? COLORS.alert : COLORS.textMuted;
+  1088→  const evLabel = Math.abs(ev.raw) < 5 ? "Even" : ev.raw > 0 ? (ev.raw > 20 ? "Winning" : "Slight edge") : ev.raw < -20 ? "Losing" : "Slight edge (AI)";
+  1089→
+  1090→  return (
+  1091→    <div style={{ position: "absolute", left: 0, right: 0, bottom: 0 }}>
+  1092→      {!expanded && (
+  1093→        <div
+  1094→          onMouseEnter={onEnter}
+  1095→          onClick={onTap}
+  1096→          style={{
+  1097→            display: "flex",
+  1098→            alignItems: "center",
+  1099→            justifyContent: "center",
+  1100→            gap: 6,
+  1101→            padding: "7px 0",
+  1102→            fontSize: 12.5,
+  1103→            color: COLORS.text,
+  1104→            background: `linear-gradient(0deg, ${COLORS.panel}ee, transparent)`,
+  1105→            cursor: "pointer",
+  1106→          }}
+  1107→        >
+  1108→          <span style={{ width: 7, height: 7, borderRadius: "50%", background: evColor }} />
+  1109→          Analysis {ev.display > 0 ? "+" : ""}
+  1110→          {ev.display}
+  1111→          <ChevronUp size={13} />
+  1112→        </div>
+  1113→      )}
+  1114→      {expanded && (
+  1115→        <div
+  1116→          onMouseLeave={onLeave}
+  1117→          style={{
+  1118→            background: "rgba(27,32,40,0.92)",
+  1119→            backdropFilter: "blur(14px)",
+  1120→            borderTop: `1px solid ${COLORS.border}`,
+  1121→            borderRadius: "12px 12px 0 0",
+  1122→            maxHeight: "72%",
+  1123→            overflowY: "auto",
+  1124→            padding: 14,
+  1125→          }}
+  1126→        >
+  1127→          <div
+  1128→            onClick={onTap}
+  1129→            style={{ display: "flex", justifyContent: "space-between", alignItems: "center", cursor: "pointer", marginBottom: 10 }}
+  1130→          >
+  1131→            <span style={{ fontSize: 13, fontWeight: 600 }}>Analysis</span>
+  1132→            <ChevronDown size={15} color={COLORS.textMuted} />
+  1133→          </div>
+  1134→
+  1135→          <Section title="Position">
+  1136→            <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 4 }}>
+  1137→              <span style={{ fontSize: 20, fontWeight: 700, color: evColor, fontVariantNumeric: "tabular-nums" }}>
+  1138→                {ev.display > 0 ? "+" : ""}
+  1139→                {ev.display}
+  1140→              </span>
+  1141→              <span style={{ fontSize: 12.5, color: evColor }}>{evLabel}</span>
+  1142→            </div>
+  1143→            <div style={{ display: "flex", height: 6, borderRadius: 3, overflow: "hidden", marginBottom: 4 }}>
+  1144→              <div style={{ width: `${analysis.playerWinPct}%`, background: COLORS.accent }} />
+  1145→              <div style={{ width: `${analysis.aiWinPct}%`, background: COLORS.stone2 }} />
+  1146→            </div>
+  1147→            <div style={{ fontSize: 11, color: COLORS.textMuted }}>
+  1148→              You {analysis.playerWinPct}% · AI {analysis.aiWinPct}% win probability
+  1149→            </div>
+  1150→          </Section>
+  1151→
+  1152→          <Section title="AI reasoning">
+  1153→            <div style={{ fontSize: 12.5, color: COLORS.text }}>
+  1154→              Played {cellLabel(analysis.aiReasonCell, n)} — {REASON_TEXT[analysis.aiReason] || "Building position."}
+  1155→            </div>
+  1156→          </Section>
+  1157→
+  1158→          <TwoCol>
+  1159→            <Section title="Your best options">
+  1160→              {analysis.humanOptions.length === 0 && <Faint>No urgent options yet.</Faint>}
+  1161→              {analysis.humanOptions.map((o) => (
+  1162→                <Row key={o.cell}>
+  1163→                  <span style={{ fontVariantNumeric: "tabular-nums", fontWeight: 600, width: 34 }}>{cellLabel(o.cell, n)}</span>
+  1164→                  <CategoryChip category={o.category} isFork={o.isFork} />
+  1165→                </Row>
+  1166→              ))}
+  1167→            </Section>
+  1168→            <Section title="AI considered">
+  1169→              {analysis.aiConsidered.slice(0, 5).map((c) => {
+  1170→                const maxV = analysis.aiConsidered[0]?.visits || 1;
+  1171→                return (
+  1172→                  <Row key={c.cell}>
+  1173→                    <span style={{ fontVariantNumeric: "tabular-nums", fontWeight: 600, width: 34 }}>{cellLabel(c.cell, n)}</span>
+  1174→                    <div style={{ flex: 1, height: 5, borderRadius: 3, background: COLORS.panelAlt, overflow: "hidden" }}>
+  1175→                      <div style={{ width: `${(c.visits / maxV) * 100}%`, height: "100%", background: COLORS.amber }} />
+  1176→                    </div>
+  1177→                    <span style={{ fontSize: 11, color: COLORS.textFaint, width: 34, textAlign: "right" }}>{Math.round(c.winRate * 100)}%</span>
+  1178→                  </Row>
+  1179→                );
+  1180→              })}
+  1181→            </Section>
+  1182→          </TwoCol>
+  1183→
+  1184→          <Section title="Threats on the board">
+  1185→            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+  1186→              <ThreatList label="You" counts={analysis.threats.player} />
+  1187→              <ThreatList label="AI" counts={analysis.threats.ai} />
+  1188→            </div>
+  1189→          </Section>
+  1190→
+  1191→          {analysis.scoring && (
+  1192→            <Section title="Score forecast">
+  1193→              <div style={{ fontSize: 11.5, color: COLORS.textMuted, marginBottom: 6 }}>
+  1194→                {analysis.scoring.remaining} moves left · board {analysis.scoring.fillPct}% full
+  1195→              </div>
+  1196→              <div style={{ fontSize: 12.5, marginBottom: 8 }}>
+  1197→                Pace {analysis.scoring.playerPace.toFixed(1)} / {analysis.scoring.aiPace.toFixed(1)} pts per move · projected final ~
+  1198→                {analysis.scoring.projPlayer} / ~{analysis.scoring.projAi}
+  1199→              </div>
+  1200→              <TwoCol>
+  1201→                <div>
+  1202→                  <Faint>Your best scoring moves</Faint>
+  1203→                  {analysis.scoring.playerMoves.map((m) => (
+  1204→                    <Row key={m.cell}>
+  1205→                      <span style={{ fontVariantNumeric: "tabular-nums", fontWeight: 600, width: 34 }}>{cellLabel(m.cell, n)}</span>
+  1206→                      <span style={{ color: COLORS.accent, fontSize: 12 }}>+{m.delta}</span>
+  1207→                    </Row>
+  1208→                  ))}
+  1209→                </div>
+  1210→                <div>
+  1211→                  <Faint>
+  1212→                    <Shield size={11} style={{ verticalAlign: -2, marginRight: 3 }} />
+  1213→                    AI's scoring threats
+  1214→                  </Faint>
+  1215→                  {analysis.scoring.aiThreats.map((m) => (
+  1216→                    <Row key={m.cell}>
+  1217→                      <span style={{ fontVariantNumeric: "tabular-nums", fontWeight: 600, width: 34 }}>{cellLabel(m.cell, n)}</span>
+  1218→                      <span style={{ color: COLORS.alert, fontSize: 12 }}>+{m.delta}</span>
+  1219→                    </Row>
+  1220→                  ))}
+  1221→                </div>
+  1222→              </TwoCol>
+  1223→            </Section>
+  1224→          )}
+  1225→
+  1226→          <Section title="Search">
+  1227→            <div style={{ fontSize: 11.5, color: COLORS.textMuted, display: "flex", flexWrap: "wrap", gap: "4px 12px" }}>
+  1228→              <span>{analysis.mcts.simulations.toLocaleString()} simulations</span>
+  1229→              <span>{analysis.mcts.elapsedMs}ms</span>
+  1230→              <span>β {analysis.mcts.raveBeta.toFixed(2)}</span>
+  1231→              <span>{Math.round(analysis.mcts.totalVisits).toLocaleString()} tree visits</span>
+  1232→            </div>
+  1233→          </Section>
+  1234→
+  1235→          <Section title="Auto-peek duration">
+  1236→            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+  1237→              <input
+  1238→                type="number"
+  1239→                min={200}
+  1240→                max={60000}
+  1241→                step={100}
+  1242→                value={peekDurationMs}
+  1243→                onChange={(e) => setPeekDurationMs(Math.max(200, Math.min(60000, Number(e.target.value) || 200)))}
+  1244→                style={{
+  1245→                  width: 90,
+  1246→                  padding: "6px 8px",
+  1247→                  borderRadius: 6,
+  1248→                  border: `1px solid ${COLORS.border}`,
+  1249→                  background: COLORS.panelAlt,
+  1250→                  color: COLORS.text,
+  1251→                  fontSize: 12.5,
+  1252→                  fontVariantNumeric: "tabular-nums",
+  1253→                }}
+  1254→              />
+  1255→              <span style={{ fontSize: 11.5, color: COLORS.textFaint }}>ms before this panel auto-hides after a move</span>
+  1256→            </div>
+  1257→          </Section>
+  1258→        </div>
+  1259→      )}
+  1260→    </div>
+  1261→  );
+  1262→}
+  1263→function Section({ title, children }) {
+  1264→  return (
+  1265→    <div style={{ marginBottom: 12 }}>
+  1266→      <div style={{ fontSize: 10.5, letterSpacing: 0.4, color: COLORS.textFaint, marginBottom: 5, textTransform: "uppercase" }}>{title}</div>
+  1267→      {children}
+  1268→    </div>
+  1269→  );
+  1270→}
+  1271→function TwoCol({ children }) {
+  1272→  return <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>{children}</div>;
+  1273→}
+  1274→function Row({ children }) {
+  1275→  return <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "3px 0" }}>{children}</div>;
+  1276→}
+  1277→function Faint({ children }) {
+  1278→  return <div style={{ fontSize: 11.5, color: COLORS.textFaint, marginBottom: 3 }}>{children}</div>;
+  1279→}
+  1280→function ThreatList({ label, counts }) {
+  1281→  const entries = Object.entries(counts).filter(([, v]) => v > 0);
+  1282→  return (
+  1283→    <div>
+  1284→      <Faint>{label}</Faint>
+  1285→      {entries.length === 0 && <div style={{ fontSize: 11.5, color: COLORS.textFaint }}>None</div>}
+  1286→      {entries.map(([k, v]) => (
+  1287→        <div key={k} style={{ fontSize: 11.5, color: COLORS.text, display: "flex", justifyContent: "space-between" }}>
+  1288→          <span>{k.replace(/_/g, " ").toLowerCase()}</span>
+  1289→          <span style={{ fontVariantNumeric: "tabular-nums" }}>{v}</span>
+  1290→        </div>
+  1291→      ))}
+  1292→    </div>
+  1293→  );
+  1294→}
+  1295→
+  1296→function SettingsPanel({ open, onClose, n, setN, winLen, setWinLen, mode, setMode, firstPlayer, setFirstPlayer, simulations, setSimulations, timeLimitMs, setTimeLimitMs, onTrain, training, trainResult, raveVisits }) {
+  1297→  if (!open) return null;
+  1298→  return (
+  1299→    <div
+  1300→      style={{ position: "absolute", inset: 0, background: "rgba(0,0,0,0.45)", zIndex: 20, display: "flex", justifyContent: "flex-end" }}
+  1301→      onClick={onClose}
+  1302→    >
+  1303→      <div
+  1304→        onClick={(e) => e.stopPropagation()}
+  1305→        style={{ width: "min(360px, 92vw)", height: "100%", background: COLORS.panel, borderLeft: `1px solid ${COLORS.border}`, padding: 18, overflowY: "auto" }}
+  1306→      >
+  1307→        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+  1308→          <span style={{ fontSize: 15, fontWeight: 600 }}>Settings</span>
+  1309→          <button onClick={onClose} aria-label="Close settings" style={{ background: "none", border: "none", color: COLORS.textMuted, cursor: "pointer", minWidth: 40, minHeight: 40 }}>
+  1310→            <X size={18} />
+  1311→          </button>
+  1312→        </div>
+  1313→
+  1314→        <SettingRow label="Mode">
+  1315→          <div style={{ display: "flex", gap: 6 }}>
+  1316→            {[
+  1317→              ["classic", "Classic"],
+  1318→              ["scoring", "Score Attack"],
+  1319→            ].map(([val, lab]) => (
+  1320→              <button
+  1321→                key={val}
+  1322→                onClick={() => setMode(val)}
+  1323→                style={{
+  1324→                  flex: 1,
+  1325→                  padding: "8px 0",
+  1326→                  minHeight: 40,
+  1327→                  borderRadius: 8,
+  1328→                  border: `1px solid ${mode === val ? COLORS.accent : COLORS.border}`,
+  1329→                  background: mode === val ? COLORS.accent : COLORS.panelAlt,
+  1330→                  color: "#fff",
+  1331→                  fontSize: 13,
+  1332→                  cursor: "pointer",
+  1333→                }}
+  1334→              >
+  1335→                {lab}
+  1336→              </button>
+  1337→            ))}
+  1338→          </div>
+  1339→          <Faint>{mode === "classic" ? `First to connect ${winLen} wins.` : "Plays to a full board; most points wins."}</Faint>
+  1340→        </SettingRow>
+  1341→
+  1342→        <SettingRow label={`Board size — ${n}×${n}`}>
+  1343→          <input type="range" min={5} max={15} step={2} value={n} onChange={(e) => setN(Number(e.target.value))} style={{ width: "100%" }} />
+  1344→        </SettingRow>
+  1345→
+  1346→        {mode === "classic" && (
+  1347→          <SettingRow label={`Win length — ${winLen}`}>
+  1348→            <input type="range" min={3} max={n} step={1} value={winLen} onChange={(e) => setWinLen(Number(e.target.value))} style={{ width: "100%" }} />
+  1349→          </SettingRow>
+  1350→        )}
+  1351→
+  1352→        <SettingRow label="Who plays first">
+  1353→          <div style={{ display: "flex", gap: 6 }}>
+  1354→            {[
+  1355→              [1, "You"],
+  1356→              [2, "AI"],
+  1357→            ].map(([val, lab]) => (
+  1358→              <button
+  1359→                key={val}
+  1360→                onClick={() => setFirstPlayer(val)}
+  1361→                style={{
+  1362→                  flex: 1,
+  1363→                  padding: "8px 0",
+  1364→                  minHeight: 40,
+  1365→                  borderRadius: 8,
+  1366→                  border: `1px solid ${firstPlayer === val ? COLORS.accent : COLORS.border}`,
+  1367→                  background: firstPlayer === val ? COLORS.accent : COLORS.panelAlt,
+  1368→                  color: "#fff",
+  1369→                  fontSize: 13,
+  1370→                  cursor: "pointer",
+  1371→                }}
+  1372→              >
+  1373→                {lab}
+  1374→              </button>
+  1375→            ))}
+  1376→          </div>
+  1377→        </SettingRow>
+  1378→
+  1379→        <SettingRow label={`Thinking budget — ${simulations.toLocaleString()} sims, ${(timeLimitMs / 1000).toFixed(1)}s cap`}>
+  1380→          <input type="range" min={200} max={6000} step={100} value={simulations} onChange={(e) => setSimulations(Number(e.target.value))} style={{ width: "100%" }} />
+  1381→          <input type="range" min={300} max={3000} step={100} value={timeLimitMs} onChange={(e) => setTimeLimitMs(Number(e.target.value))} style={{ width: "100%", marginTop: 6 }} />
+  1382→        </SettingRow>
+  1383→
+  1384→        <SettingRow label="Quick train">
+  1385→          <Faint>Runs fast self-play games (no tree search) to seed this exact board size + mode before you play.</Faint>
+  1386→          <div style={{ display: "flex", gap: 8, marginTop: 4 }}>
+  1387→            <button
+  1388→              onClick={() => onTrain(200)}
+  1389→              disabled={training}
+  1390→              style={{ flex: 1, padding: "9px 0", minHeight: 40, borderRadius: 8, border: `1px solid ${COLORS.border}`, background: COLORS.panelAlt, color: "#fff", cursor: training ? "default" : "pointer", opacity: training ? 0.6 : 1, fontSize: 13 }}
+  1391→            >
+  1392→              {training ? "Training…" : "Train 200 games"}
+  1393→            </button>
+  1394→          </div>
+  1395→          {trainResult && (
+  1396→            <Faint>
+  1397→              Last run: P1 {trainResult.p1} · P2 {trainResult.p2} · draw {trainResult.draw}
+  1398→            </Faint>
+  1399→          )}
+  1400→          <Faint>Table for this config: {Math.round(raveVisits).toLocaleString()} accumulated visits</Faint>
+  1401→        </SettingRow>
+  1402→
+  1403→        <SettingRow label="About this AI">
+  1404→          <Faint>
+  1405→            MCTS + RAVE search, a rule-based threat classifier for tactics (no missed forced wins/blocks, fork detection), and a
+  1406→            persistent per-board-size learning table saved in this browser. No neural network.
+  1407→          </Faint>
+  1408→        </SettingRow>
+  1409→      </div>
+  1410→    </div>
+  1411→  );
+  1412→}
+  1413→function SettingRow({ label, children }) {
+  1414→  return (
+  1415→    <div style={{ marginBottom: 18 }}>
+  1416→      <div style={{ fontSize: 12.5, color: COLORS.textMuted, marginBottom: 6 }}>{label}</div>
+  1417→      {children}
+  1418→    </div>
+  1419→  );
+  1420→}
+  1421→
+  1422→// ---------------------------------------------------------------------------
+  1423→// Main component
+  1424→// ---------------------------------------------------------------------------
+  1425→export default function GomokuGame() {
+  1426→  const [n, setN] = useState(9);
+  1427→  const [winLen, setWinLen] = useState(5);
+  1428→  const [mode, setMode] = useState("classic");
+  1429→  const [firstPlayer, setFirstPlayer] = useState(1);
+  1430→  const [simulations, setSimulations] = useState(1500);
+  1431→  const [timeLimitMs, setTimeLimitMs] = useState(1200);
+  1432→  const [peekDurationMs, setPeekDurationMs] = useState(2200);
+  1433→
+  1434→  const [game, setGame] = useState(() => freshGame(9, 1));
+  1435→  const [analysis, setAnalysis] = useState(null);
+  1436→  const [thinking, setThinking] = useState(false);
+  1437→  const [raveReady, setRaveReady] = useState(false);
+  1438→  const [raveVisits, setRaveVisits] = useState(0);
+  1439→  const raveRef = useRef(null);
+  1440→  const raveKeyRef = useRef("");
+  1441→
+  1442→  const [training, setTraining] = useState(false);
+  1443→  const [trainResult, setTrainResult] = useState(null);
+  1444→
+  1445→  const [showSettings, setShowSettings] = useState(false);
+  1446→  const [hovered, setHovered] = useState(false);
+  1447→  const [pinned, setPinned] = useState(false);
+  1448→  const [autoPeek, setAutoPeek] = useState(false);
+  1449→  const mountedRef = useRef(false);
+  1450→  const peekTimerRef = useRef(null);
+  1451→  const aiKickoffRef = useRef(null);
+  1452→  // Bumped on every game reset. Lets an in-flight AI computation started
+  1453→  // against the OLD board detect, when it finishes, that the game has since
+  1454→  // been reset (e.g. user hit "New Game" mid-think) and discard its result
+  1455→  // instead of applying a stale move to the fresh board.
+  1456→  const gameGenRef = useRef(0);
+  1457→
+  1458→  const wrapRef = useRef(null);
+  1459→  const [boardPx, setBoardPx] = useState(320);
+  1460→
+  1461→  // ---- responsive square board sizing (JS-computed, applied to the outer
+  1462→  // wrapper, never CSS aspect-ratio — see rebuild-spec Part F.1/F.2) ----
+  1463→  useEffect(() => {
+  1464→    function recompute() {
+  1465→      const el = wrapRef.current;
+  1466→      if (!el) return;
+  1467→      const rect = el.getBoundingClientRect();
+  1468→      const evalBarSpace = 48;
+  1469→      const target = Math.max(
+  1470→        180,
+  1471→        Math.min(rect.width - evalBarSpace, rect.height, window.innerWidth * 0.85, window.innerHeight * 0.72)
+  1472→      );
+  1473→      setBoardPx(Math.floor(target));
+  1474→    }
+  1475→    recompute();
+  1476→    const ro = new ResizeObserver(recompute);
+  1477→    if (wrapRef.current) ro.observe(wrapRef.current);
+  1478→    window.addEventListener("resize", recompute);
+  1479→    return () => {
+  1480→      ro.disconnect();
+  1481→      window.removeEventListener("resize", recompute);
+  1482→    };
+  1483→  }, []);
+  1484→
+  1485→  // ---- load / decay GlobalRAVE whenever board size or mode changes ----
+  1486→  // Debounced: dragging the board-size slider changes `n` on every tick,
+  1487→  // and each change would otherwise fire a window.storage.get() call —
+  1488→  // wasteful (and the storage API is explicitly rate-limited). Wait for
+  1489→  // the value to settle before actually loading.
+  1490→  useEffect(() => {
+  1491→    let cancelled = false;
+  1492→    setRaveReady(false);
+  1493→    const key = `rave_${n}_${mode}`;
+  1494→    const debounce = setTimeout(() => {
+  1495→      (async () => {
+  1496→        let gr = null;
+  1497→        try {
+  1498→          const res = await window.storage.get(key);
+  1499→          if (res && res.value) gr = GlobalRAVE.fromJSON(JSON.parse(res.value));
+  1500→        } catch (e) {
+  1501→          gr = null;
+  1502→        }
+  1503→        if (!gr) gr = new GlobalRAVE(n);
+  1504→        else gr.decay(0.9); // real new game/config switch -> decay old knowledge
+  1505→        if (!cancelled) {
+  1506→          raveRef.current = gr;
+  1507→          raveKeyRef.current = key;
+  1508→          setRaveVisits(gr.totalVisits());
+  1509→          setRaveReady(true);
+  1510→        }
+  1511→      })();
+  1512→    }, 300);
+  1513→    return () => {
+  1514→      cancelled = true;
+  1515→      clearTimeout(debounce);
+  1516→    };
+  1517→  }, [n, mode]);
+  1518→
+  1519→  // ---- reset the game whenever size/mode/winLen/firstPlayer change ----
+  1520→  useEffect(() => {
+  1521→    gameGenRef.current += 1;
+  1522→    setGame(freshGame(n, firstPlayer));
+  1523→    setAnalysis(null);
+  1524→    setThinking(false);
+  1525→    setHovered(false);
+  1526→    setPinned(false);
+  1527→    setAutoPeek(false);
+  1528→  }, [n, mode, winLen, firstPlayer]);
+  1529→
+  1530→  const saveRave = useCallback(() => {
+  1531→    if (!raveRef.current) return;
+  1532→    const key = raveKeyRef.current;
+  1533→    const payload = JSON.stringify(raveRef.current.toJSON());
+  1534→    window.storage.set(key, payload).catch(() => {});
+  1535→  }, []);
+  1536→
+  1537→  const applyAiMove = useCallback(
+  1538→    (res, boardBefore, scoresBefore) => {
+  1539→      setGame((prev) => {
+  1540→        if (prev.status !== "playing" || prev.board[res.move] !== 0) return prev;
+  1541→        const nb = prev.board.slice();
+  1542→        nb[res.move] = 2;
+  1543→        const row = Math.floor(res.move / n),
+  1544→          col = res.move % n;
+  1545→        let status = "playing",
+  1546→          winner = 0;
+  1547→        let scores = prev.scores;
+  1548→        if (mode === "classic") {
+  1549→          if (checkWinAt(nb, n, winLen, row, col, 2)) {
+  1550→            status = "won";
+  1551→            winner = 2;
+  1552→          } else if (legalMoves(nb).length === 0) {
+  1553→            status = "draw";
+  1554→          }
+  1555→        } else {
+  1556→          const delta = scoreMoveDelta(prev.board, n, row, col, 2);
+  1557→          scores = { ...prev.scores, 2: prev.scores[2] + delta };
+  1558→          if (legalMoves(nb).length === 0) {
+  1559→            status = scores[1] === scores[2] ? "draw" : "won";
+  1560→            winner = scores[1] > scores[2] ? 1 : 2;
+  1561→          }
+  1562→        }
+  1563→        return {
+  1564→          board: nb,
+  1565→          player: 1,
+  1566→          status,
+  1567→          winner,
+  1568→          scores,
+  1569→          moveHistory: [...prev.moveHistory, { cell: res.move, player: 2 }],
+  1570→        };
+  1571→      });
+  1572→      // Analysis is built from the EXACT board/scores the search ran
+  1573→      // against (passed in explicitly), not read back from closure state —
+  1574→      // avoids any dependence on `game` not having moved on in the
+  1575→      // meantime.
+  1576→      setAnalysis(buildAnalysis(boardBefore, n, winLen, mode, res, scoresBefore));
+  1577→      setThinking(false);
+  1578→      setAutoPeek(true);
+  1579→      saveRave();
+  1580→    },
+  1581→    [n, winLen, mode, saveRave]
+  1582→  );
+  1583→
+  1584→  // ---- trigger AI turn ----
+  1585→  useEffect(() => {
+  1586→    if (game.status !== "playing" || game.player !== 2 || !raveReady || thinking) return;
+  1587→    setThinking(true);
+  1588→    const boardSnapshot = game.board.slice();
+  1589→    const scoresSnapshot = game.scores;
+  1590→    const myGen = gameGenRef.current;
+  1591→    const t = setTimeout(() => {
+  1592→      if (myGen !== gameGenRef.current) {
+  1593→        // Game was reset (e.g. "New Game" clicked) while this computation
+  1594→        // was in flight — discard the result instead of applying a move
+  1595→        // computed for a board that no longer exists.
+  1596→        return;
+  1597→      }
+  1598→      const res = runMCTS({
+  1599→        board: boardSnapshot,
+  1600→        n,
+  1601→        winLen,
+  1602→        mode,
+  1603→        aiPlayer: 2,
+  1604→        simulations,
+  1605→        timeLimitMs,
+  1606→        globalRave: raveRef.current,
+  1607→        seed: (Date.now() ^ (boardSnapshot.length * 2654435761)) >>> 0,
+  1608→      });
+  1609→      if (myGen !== gameGenRef.current) return; // re-check: reset could have happened during the (blocking) search too
+  1610→      setRaveVisits(raveRef.current.totalVisits());
+  1611→      applyAiMoveRef.current(res, boardSnapshot, scoresSnapshot);
+  1612→    }, 40);
+  1613→    aiKickoffRef.current = t;
+  1614→    return () => clearTimeout(t);
+  1615→    // eslint-disable-next-line react-hooks/exhaustive-deps
+  1616→  }, [game.status, game.player, game.board, raveReady, n, winLen, mode, simulations, timeLimitMs]);
+  1617→
+  1618→  const applyAiMoveRef = useRef(applyAiMove);
+  1619→  applyAiMoveRef.current = applyAiMove;
+  1620→
+  1621→  function handleCellClick(cell) {
+  1622→    if (game.status !== "playing" || game.player !== 1 || game.board[cell] !== 0 || thinking) return;
+  1623→    setGame((prev) => {
+  1624→      const nb = prev.board.slice();
+  1625→      nb[cell] = 1;
+  1626→      const row = Math.floor(cell / n),
+  1627→        col = cell % n;
+  1628→      let status = "playing",
+  1629→        winner = 0;
+  1630→      let scores = prev.scores;
+  1631→      if (mode === "classic") {
+  1632→        if (checkWinAt(nb, n, winLen, row, col, 1)) {
+  1633→          status = "won";
+  1634→          winner = 1;
+  1635→        } else if (legalMoves(nb).length === 0) {
+  1636→          status = "draw";
+  1637→        }
+  1638→      } else {
+  1639→        const delta = scoreMoveDelta(prev.board, n, row, col, 1);
+  1640→        scores = { ...prev.scores, 1: prev.scores[1] + delta };
+  1641→        if (legalMoves(nb).length === 0) {
+  1642→          status = scores[1] === scores[2] ? "draw" : "won";
+  1643→          winner = scores[1] > scores[2] ? 1 : 2;
+  1644→        }
+  1645→      }
+  1646→      return { board: nb, player: 2, status, winner, scores, moveHistory: [...prev.moveHistory, { cell, player: 1 }] };
+  1647→    });
+  1648→    setHovered(false);
+  1649→    setPinned(false);
+  1650→    setAutoPeek(false);
+  1651→  }
+  1652→
+  1653→  function newGame() {
+  1654→    gameGenRef.current += 1;
+  1655→    setGame(freshGame(n, firstPlayer));
+  1656→    setAnalysis(null);
+  1657→    setThinking(false);
+  1658→    setHovered(false);
+  1659→    setPinned(false);
+  1660→    setAutoPeek(false);
+  1661→    if (aiKickoffRef.current) clearTimeout(aiKickoffRef.current);
+  1662→  }
+  1663→
+  1664→  async function runTrain(count) {
+  1665→    if (!raveRef.current || training) return;
+  1666→    setTraining(true);
+  1667→    await new Promise((r) => setTimeout(r, 20));
+  1668→    const result = trainGames(n, winLen, mode, count, raveRef.current, Date.now() & 0xffff);
+  1669→    setTrainResult(result);
+  1670→    setRaveVisits(raveRef.current.totalVisits());
+  1671→    saveRave();
+  1672→    setTraining(false);
+  1673→  }
+  1674→
+  1675→  // ---- auto-peek state machine ----
+  1676→  useEffect(() => {
+  1677→    if (!mountedRef.current) {
+  1678→      mountedRef.current = true;
+  1679→      return;
+  1680→    }
+  1681→    if (!autoPeek) return;
+  1682→    if (peekTimerRef.current) clearTimeout(peekTimerRef.current);
+  1683→    peekTimerRef.current = setTimeout(() => setAutoPeek(false), peekDurationMs);
+  1684→    return () => clearTimeout(peekTimerRef.current);
+  1685→  }, [autoPeek, peekDurationMs]);
+  1686→
+  1687→  const expanded = hovered || pinned || autoPeek;
+  1688→
+  1689→  function onPanelEnter() {
+  1690→    setHovered(true);
+  1691→  }
+  1692→  function onPanelLeave() {
+  1693→    setHovered(false);
+  1694→    setPinned(false);
+  1695→    if (peekTimerRef.current) clearTimeout(peekTimerRef.current);
+  1696→    setAutoPeek(false);
+  1697→  }
+  1698→  function onPanelTap() {
+  1699→    if (hovered) return;
+  1700→    setPinned((p) => {
+  1701→      const next = !p;
+  1702→      if (next && peekTimerRef.current) clearTimeout(peekTimerRef.current);
+  1703→      return next;
+  1704→    });
+  1705→  }
+  1706→
+  1707→  const statusText =
+  1708→    game.status === "won"
+  1709→      ? game.winner === 1
+  1710→        ? "You won"
+  1711→        : "AI won"
+  1712→      : game.status === "draw"
+  1713→      ? mode === "scoring"
+  1714→        ? game.scores[1] === game.scores[2]
+  1715→          ? "Tied"
+  1716→          : game.scores[1] > game.scores[2]
+  1717→          ? "You won on points"
+  1718→          : "AI won on points"
+  1719→        : "Draw"
+  1720→      : thinking
+  1721→      ? "AI thinking…"
+  1722→      : "Your turn";
+  1723→
+  1724→  return (
+  1725→    <div style={{ background: COLORS.app, color: COLORS.text, fontFamily: 'ui-sans-serif, -apple-system, "Segoe UI", Roboto, Arial, sans-serif', borderRadius: 16, minHeight: 560, display: "flex", flexDirection: "column", overflow: "hidden" }}>
+  1726→      <style>{`
+  1727→        @keyframes pulseDot { 0%,100%{opacity:.35} 50%{opacity:1} }
+  1728→        .ibtn-label { display: none; }
+  1729→        @media (min-width: 520px) { .ibtn-label { display: inline; } }
+  1730→        input[type=range] { accent-color: ${COLORS.accent}; }
+  1731→      `}</style>
+  1732→
+  1733→      {/* Toolbar */}
+  1734→      <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "10px 12px", borderBottom: `1px solid ${COLORS.border}`, flexWrap: "wrap" }}>
+  1735→        <span style={{ fontWeight: 700, fontSize: 15, marginRight: 4 }}>N-in-a-Row</span>
+  1736→        <div style={{ display: "flex", gap: 4, background: COLORS.panelAlt, padding: 3, borderRadius: 8 }}>
+  1737→          {[
+  1738→            ["classic", "Classic"],
+  1739→            ["scoring", "Score Attack"],
+  1740→          ].map(([val, lab]) => (
+  1741→            <button
+  1742→              key={val}
+  1743→              onClick={() => setMode(val)}
+  1744→              style={{ padding: "6px 10px", minHeight: 34, borderRadius: 6, border: "none", background: mode === val ? COLORS.accent : "transparent", color: "#fff", fontSize: 12.5, cursor: "pointer" }}
+  1745→            >
+  1746→              {lab}
+  1747→            </button>
+  1748→          ))}
+  1749→        </div>
+  1750→        {mode === "scoring" && (
+  1751→          <span style={{ fontSize: 13, fontVariantNumeric: "tabular-nums", padding: "4px 10px", borderRadius: 999, background: COLORS.panelAlt, border: `1px solid ${COLORS.border}` }}>
+  1752→            You {game.scores[1]} : {game.scores[2]} AI
+  1753→          </span>
+  1754→        )}
+  1755→        <div style={{ flex: 1 }} />
+  1756→        <IconBtn onClick={newGame} title="New game" icon={<RotateCcw size={15} />} label="New game" />
+  1757→        <IconBtn onClick={() => runTrain(200)} title="Quick train (200 self-play games)" icon={<Zap size={15} />} label="Train" disabled={training} />
+  1758→        <IconBtn onClick={() => setShowSettings(true)} title="Settings" icon={<SettingsIcon size={15} />} label="Settings" />
+  1759→      </div>
+  1760→
+  1761→      {/* Status */}
+  1762→      <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 8, padding: "6px 0", fontSize: 12.5, color: COLORS.textMuted, borderBottom: `1px solid ${COLORS.border}` }}>
+  1763→        <span style={{ width: 7, height: 7, borderRadius: "50%", background: game.status === "won" ? COLORS.accent : thinking ? COLORS.amber : COLORS.textFaint }} />
+  1764→        {statusText} · move {game.moveHistory.length}
+  1765→      </div>
+  1766→
+  1767→      {/* Board + eval bar, with analysis overlay */}
+  1768→      <div ref={wrapRef} style={{ flex: 1, position: "relative", display: "flex", alignItems: "center", justifyContent: "center", padding: 12, minHeight: 320 }}>
+  1769→        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+  1770→          <Board n={n} board={game.board} onCellClick={handleCellClick} disabled={game.status !== "playing" || game.player !== 1 || thinking} lastMove={game.moveHistory.length ? game.moveHistory[game.moveHistory.length - 1].cell : -1} sizePx={boardPx} />
+  1771→          <EvalBar playerPct={analysis?.playerWinPct ?? 50} aiPct={analysis?.aiWinPct ?? 50} thinking={thinking} mode={mode} scores={game.scores} />
+  1772→        </div>
+  1773→        <AnalysisPanel analysis={analysis} n={n} mode={mode} expanded={expanded} onEnter={onPanelEnter} onLeave={onPanelLeave} onTap={onPanelTap} peekDurationMs={peekDurationMs} setPeekDurationMs={setPeekDurationMs} thinking={thinking} />
+  1774→        <SettingsPanel
+  1775→          open={showSettings}
+  1776→          onClose={() => setShowSettings(false)}
+  1777→          n={n}
+  1778→          setN={setN}
+  1779→          winLen={winLen}
+  1780→          setWinLen={setWinLen}
+  1781→          mode={mode}
+  1782→          setMode={setMode}
+  1783→          firstPlayer={firstPlayer}
+  1784→          setFirstPlayer={setFirstPlayer}
+  1785→          simulations={simulations}
+  1786→          setSimulations={setSimulations}
+  1787→          timeLimitMs={timeLimitMs}
+  1788→          setTimeLimitMs={setTimeLimitMs}
+  1789→          onTrain={runTrain}
+  1790→          training={training}
+  1791→          trainResult={trainResult}
+  1792→          raveVisits={raveVisits}
+  1793→        />
+  1794→      </div>
+  1795→
+  1796→      <div style={{ textAlign: "center", fontSize: 10.5, color: COLORS.textFaint, padding: "6px 0", borderTop: `1px solid ${COLORS.border}` }}>
+  1797→        MCTS + RAVE · Threat classifier · {Math.round(raveVisits).toLocaleString()} learned visits for {n}×{n} {mode}
+  1798→      </div>
+  1799→    </div>
+  1800→  );
+  1801→}
