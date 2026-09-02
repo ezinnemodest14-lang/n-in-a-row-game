@@ -14,24 +14,18 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Z.ai Code Scaffold - AI-Powered Development",
-  description: "Modern Next.js scaffold optimized for AI-powered development with Z.ai. Built with TypeScript, Tailwind CSS, and shadcn/ui.",
-  keywords: ["Z.ai", "Next.js", "TypeScript", "Tailwind CSS", "shadcn/ui", "AI development", "React"],
-  authors: [{ name: "Z.ai Team" }],
+  title: "N-in-a-Row — MCTS + RAVE AI",
+  description:
+    "Gomoku-style N-in-a-Row against an MCTS + RAVE engine with threat classification, persistent learning and a neural evaluator.",
+  keywords: ["N-in-a-row", "Gomoku", "MCTS", "RAVE", "game AI", "Next.js"],
   icons: {
     icon: "https://z-cdn.chatglm.cn/z-ai/static/logo.svg",
   },
   openGraph: {
-    title: "Z.ai Code Scaffold",
-    description: "AI-powered development with modern React stack",
-    url: "https://chat.z.ai",
-    siteName: "Z.ai",
+    title: "N-in-a-Row — MCTS + RAVE AI",
+    description: "Play against a learning MCTS + RAVE engine",
+    siteName: "N-in-a-Row",
     type: "website",
-  },
-  twitter: {
-    card: "summary_large_image",
-    title: "Z.ai Code Scaffold",
-    description: "AI-powered development with modern React stack",
   },
 };
 

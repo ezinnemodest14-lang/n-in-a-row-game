@@ -69,3 +69,64 @@ FULL HISTORY RECOVERED. The previous session (GLM-5-Turbo) built a ~12,334-line 
    - src/app/page.tsx: overlay composition + auto-peek machine + hover persistence; layout.tsx + globals.css (theme vars, xs breakpoint, scrollbar-thin, dark mode).
    - Style refinements per user's final message: no-jiggle animation (opacity+transform only, spring stiffness↑ damping↑), higher-transparency acrylic panels, black+green eval bar w/ board-theme accents, verbose labels.
    - Train RAVE via API after build; verify end-to-end in Agent Browser (board renders, move → AI reply, panels peek/hover/pin, eval bar, training).
+
+---
+Task ID: 4
+Agent: Z.ai Code
+Task: Build standalone NN evaluation mini-service (port 3020)
+Work Log:
+- Read worklog (tasks 1 + 3). Built `/home/z/my-project/mini-services/nn-service/` as a NEW independent bun project: `package.json` with `dev: "bun --hot index.ts"`, ZERO npm dependencies, pure TypeScript only.
+- `features.ts`: `extractFeatures(board, n) → Float64Array(40)` with fully documented index layout — indices 0..23: 4 directions (horiz, vert, diag-down \, diag-up /) × 2 players × [maxConsecutiveRun/5, openEnds/2 of that run, threatCount (runs ≥ 3)/8 saturating]; 24 stone density stones/(n·n); 25 empty ratio; 26/27 mean center distance per player (corner-normalized, 0.5 neutral when no stones); 28/29 per-player stone share (0.5 on empty board); 30/31 "line potential" = Σ over win-capable lines (length ≥ 5) of (stones in line)² via saturating s/(s+n); 32..35 mobility = empty cells 4-/8-adjacent to each player's stones ÷ emptyCount; 36 lastMoverBias + 37 turn slot (parity inference, P1 always opens); 38/39 zero pads. Everything clamped [0,1]; P1/P2 ordering symmetric; board values 0 empty / 1 = P1 (human, emerald) / 2 = P2 (AI). Exports `FEATURE_DIM = 40`, `DIRS`, `extractFeatures`.
+- `neural-net.ts`: pure-TS MLP 40→128 (ReLU) → 64 (ReLU) → 1 (Sigmoid). NOTE: explicitly specified topology has 13,569 params (40·128+128 + 128·64+64 + 64+1) — the plan's "~10,305" figure does not match any 40/128/64/1 counting; topology is authoritative. He normal init (hidden) + Xavier (output) via mulberry32-seeded Box–Muller (deterministic). `forward(x)` → P1 win prob [0,1]; `trainBatch(X, y, lr)` = full-batch Adam step (β1 0.9, β2 0.999, ε 1e-8, bias-corrected) returning mean MSE; `trainEpochs()` = Fisher–Yates-shuffled mini-batches (default bs 32) reusing trainBatch; `evaluate()` = MSE + sign-accuracy (draw = |p−0.5| ≤ 0.15 band); `serialize()` / `static load()` = JSON persistence of weights + biases + Adam moments (magic `nn-eval-v1`, shape-validated).
+- `index.ts`: `Bun.serve` on HARDCODED port 3020 (no process.env.PORT). Routes: GET /health, POST /predict, POST /train; CORS `*` on every response, OPTIONS → 204 preflight. Startup: try-load `nn-model-weights.json` via Bun.file in try/catch → silent fallback to seeded init. /train generates self-play data INTERNALLY: adjacency-weighted random playouts (immediate-win taken, opponent immediate-win blocked 85% of the time, run-extending weights + jitter), features recorded AFTER each move, outcome label from P1 perspective (win 1.0 / loss 0.0 / draw 0.5); trains epochs (default 3) at lr 0.005, batch 32, shuffled; persists weights+meta via Bun.write; 409 lock against concurrent runs; input clamps (games ≤ 400, boardSize 5..24, winLength 3..min(10,board), epochs ≤ 60).
+- `bunx tsc --strict` pass on features.ts + neural-net.ts (fixed 3 TS7022 circular-inference errors in `load()` with explicit annotations; index.ts relies on Bun globals, verified at runtime).
+- Started + verified in ONE chained bash command (sandbox kills background services between calls): nohup bun run dev → health → train {games:80,boardSize:11,epochs:3} → predict → health-after.
+- Restart test: killed the process, restarted, health now reports `weightsLoaded: true`, `trained: true`, `trainingSamples: 2758`; predict reproduces a bit-identical winProb (0.4900638924897244) → deterministic weight restore confirmed; CORS preflight 204 + headers confirmed.
+Stage Summary:
+- Files: `mini-services/nn-service/{package.json, features.ts, neural-net.ts, index.ts}` + `nn-model-weights.json` (809 KB: weights + Adam moments + meta).
+- Endpoints (JSON, CORS `*`, port 3020): `GET /health`; `POST /predict {board,n}` → `{winProb1, featuresUsed, tookMs}`; `POST /train {games=60, boardSize=11, winLength=5, epochs=3}` → `{games, samples, lossBefore, lossAfter, accuracy, tookMs}`.
+- Params: 13,569 (40→128→64→1). Initial training result: 80 games → 2,758 samples; lossBefore 0.255894 → lossAfter 0.205154; accuracy 0.6653; 620 ms. Health: `{"ok":true,"service":"nn-eval","featureDim":40,"params":13569,"trained":true,"weightsLoaded":true,"trainingSamples":2758}`.
+- RESTART if killed: `cd /home/z/my-project/mini-services/nn-service && nohup bun run dev > /dev/null 2>&1 & disown` (weights auto-restore; always start + verify within one chained bash command).
+- Integration notes for next tasks: reach via gateway with `?XTransformPort=3020` (relative paths only); `/predict` returns the P1-perspective win prob for the EvalBar + 60% MCTS / 40% NN blend; `src/lib/neural-server.ts` / `neural-client.ts` wrappers still pending.
+
+---
+Task ID: 2-a
+Agent: general-purpose subagent (game component porter)
+Task: Port zip game components into project
+Work Log:
+- Read worklog.md for context (tasks 1 & 3: zip = UI layer; store/threat-classifier created by other agents).
+- Compared hooks: upload/extracted/src/hooks/{use-mobile,use-toast}.ts are byte-identical to existing src/hooks/ copies — left existing files untouched.
+- Copied all 8 game components from upload/extracted/src/components/game/ to src/components/game/: AnalysisPanel.tsx, ArchInfo.tsx, Board.tsx, EvalBar.tsx, GameInfo.tsx, QuickPreview.tsx, Settings.tsx, Toolbar.tsx (2,836 lines).
+- Verified every `@/` import across the 8 files: ui/{badge,button,card,label,scroll-area,separator,sheet,slider,switch,toggle-group,tooltip}.tsx ALL exist in src/components/ui/; @/lib/utils (cn) exists; framer-motion ^12.23.2 + lucide-react ^0.525.0 installed in node_modules. NO missing ui imports.
+- Fix a) AnalysisPanel.tsx AiMoveRow: added `boardSize: number` prop to the AiMoveRow signature, replaced hardcoded `coordLabel(move.row, move.col, 15)` with `boardSize`, and passed `boardSize={boardSize}` at its single usage site (AnalysisPanel section 9 "AI Considered", line 588). The using component (AnalysisPanel) already destructured boardSize from useGameStore — no destructuring change needed. Verified no other hardcoded ", 15)" coordLabel calls remain.
+- Fix b) AnalysisPanel.tsx RulesSection: replaced stale scoring text ("3 per triple, 4 per four, 5 per five-in-a-row") with correct SCORE_WEIGHTS: +1 per triple, +5 per four, +15 per five, +10 full row or column, +20 full diagonal, +3 cross pattern (one stone completing a horizontal AND vertical three at once), +2 breaking an opponent line of 3+. All existing styling/classes kept exactly (bg-emerald-50/60 box, Award icon, emerald-500 accent).
+- Fix c) Import path `@/lib/game/threat-classifier` (coordLabel + PlayerBestMove/ScoringAnalysis/CriticalSquare types) kept EXACTLY as is, per instructions.
+- Diffed post-fix AnalysisPanel against zip: exactly the 4 intended line changes; other 7 files byte-identical.
+- Lint: `bun run lint` (eslint .) → ZERO findings under components/game (no syntax errors).
+- tsc --noEmit on components/game: 32 errors, ALL expected-missing-module artifacts: TS2307 Cannot find '@/store/game-store' (in all 8 files) and '@/lib/game/threat-classifier' (AnalysisPanel ×2, QuickPreview ×2); plus 20 TS18046 'unknown' + 8 TS2322 errors that are downstream of the untyped missing store (analysis.playerThreats/aiThreats threat-count reductions in AnalysisPanel ~L596-598 and QuickPreview L42-43/170-175). None are real component bugs — they resolve automatically once the store + classifier modules land with types.
+Stage Summary:
+- 8/8 zip game components ported to src/components/game/ (only AnalysisPanel.tsx modified: AiMoveRow boardSize prop + RulesSection scoring text; 7 others pristine copies).
+- Hooks NOT duplicated (identical already in src/hooks/). No ui/*, lib/*, store, app, or config files touched.
+- Missing ui imports: NONE. All 11 ui components imported by game components exist.
+- Expected unresolved imports (for other agents): @/store/game-store (useGameStore), @/lib/game/threat-classifier (coordLabel, PlayerBestMove, ScoringAnalysis, CriticalSquare). Downstream tsc 'unknown' errors in AnalysisPanel + QuickPreview will clear once those modules provide types.
+- Lint status: eslint clean for components/game; tsc errors limited to the two expected missing modules + their type-propagation fallout.
+
+---
+Task ID: 5-7
+Agent: Z.ai Code (main orchestrator)
+Task: Full replication build — engine, store, API, NN integration, page composition, style fixes, end-to-end verification.
+
+Work Log:
+- Built src/lib/game/: types.ts (Analysis contract + GameStatePayload), scoring.ts (SCORE_WEIGHTS canonical), threat-classifier.ts (v3: gap patterns X_XX/XX_XX, same-type fork detection, double-open-three bonus, closed-four-dead, coordLabel skip-I, tactical safety net 8-level priority), mcts.ts (GlobalRAVE + UCT-RAVE C=220 + root threat prior 0.9 + v3 playout policy with fork tiers + 3-level tree reuse + trainGames zero-decay), analyzer.ts (full UI contract: evalScore/winProb-derived/14-section data/criticalSquares/tempo/boardControl/scoringAnalysis + LearningSnapshot), engine-runtime.ts (RAVE SQLite persistence via Prisma).
+- Built src/store/game-store.ts: zustand, full component contract, optimistic moves with rollback auto-recovery, playAuto for Auto Mode, runTraining, moveTriggered edge counter, previewDuration/analysisAutoCollapse.
+- API routes: /api/game/new (AI opening when playerFirst=false), /api/game/move (validate → apply mover → win/draw check → NN health+predict → MCTS(1500-50k sims, tree reuse via movePath) → tactical override → analysis + learning + RAVE persist), /api/game/train (single config or 14 all-size configs, TrainingRun history, opportunistic NN round).
+- NN client self-healing: spawns detached `bun mini-services/nn-service/index.ts` when port 3020 unreachable; 60/40 MCTS+NN blend visible in aiReasoning "(NN eval: 55.6%)".
+- Ported 8 UI components (subagent 2-a) + fixed AiMoveRow hardcode-15 bug + corrected RulesSection scoring text.
+- page.tsx overlay composition: main=flex wrapper (fixes h-full→0 inside block flex child), absolute board zone, eval zone hover anchor, QuickPreview docked right:100% (floats OVER board), BottomPanel absolute bottom overlay, auto-peek state machine via useGameStore.subscribe edge detection (hovered||pinned||autoPeek), Sheets for Settings/Stats, store-driven ArchInfo sheet.
+- Style fixes (user's final 3 requests): EvalBar rewritten (stone-matched black #4b5563→#111827 / green #34d399→#047857 gradients, AI/YOU labels, %, +eval badge, pulse dot, parchment track, spring 320/34 no-jiggle, no scale); QuickPreview opacity-only 0.18s tween (kills jiggle) + bg-[#fbf7ef]/45 warm acrylic; BottomPanel absolute overlay + warm acrylic.
+- globals.css: @theme --breakpoint-xs: 26rem + @utility scrollbar-thin. layout.tsx metadata.
+- Bugs found & fixed during verification: (1) store sent post-optimistic board → server "Cell occupied" 400 — now sends pre-move board; (2) h-full→0px inside block-level flex child (board invisible) — main now display:flex; (3) z-5 invalid → z-[5]; (4) ThreatCounts index signature; (5) mcts re-exports for routes.
+- Agent Browser verification (all PASSED): board renders 15×15 wooden + Go coords; click→AI reply→move#2→eval 54/46%; QuickPreview hover overlay with narrative + "NN eval: 55.6%" + threats; analysis panel 14 sections; Score Attack (0:0 scoreboard, tug-of-war bar); Settings sheet (Board Size/Thinking Budget/Quick Train/Scoring Rules corrected/Preview Duration/Auto-Collapse); mobile 390px board 83% no h-scroll; zero console errors; win detection rigged-4 test → status won + winLine 5 cells; training 150 games 392ms balanced + RAVE persisted; NN self-heals after being killed.
+
+Stage Summary:
+- COMPLETE REPLICA DELIVERED: full-stack N-in-a-Row (Next.js 16 + Prisma SQLite + NN mini-service) — engine v3, store, API, NN blend, overlay UI with auto-peek, black+green eval bar, warm translucent acrylic, no-jiggle animations. All golden paths browser-verified.
