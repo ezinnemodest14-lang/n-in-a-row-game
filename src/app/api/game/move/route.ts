@@ -9,7 +9,7 @@ import { NextResponse } from "next/server";
 import { boardToInt8, int8ToBoard } from "@/lib/game/types";
 import { cloneBoard, findWinLine, legalMoves, runMCTS, checkWinAt } from "@/lib/game/mcts";
 import { scoreMoveDelta, computeFullScore, scoreBreakdown } from "@/lib/game/scoring";
-import { buildAnalysis, buildLearningSnapshot } from "@/lib/game/analyzer";
+import { buildAnalysis, buildLearningSnapshot, buildTerminalAnalysis } from "@/lib/game/analyzer";
 import { loadRave, saveRave } from "@/lib/game/engine-runtime";
 import { nnEvaluate, nnHealth } from "@/lib/neural-client";
 import type { Analysis, GameMode, GameStatePayload, ScoreState } from "@/lib/game/types";
@@ -187,7 +187,11 @@ export async function POST(req: Request) {
         aiScore.breakdown = { fives: bd.fives - Math.ceil(bd.fives / 2), fours: bd.fours - Math.ceil(bd.fours / 2), triples: bd.triples - Math.ceil(bd.triples / 2) };
       }
       const state = buildState(flat, boardSize, winLength, gameMode, playerPiece, aiPiece, status, winner, winLine, moveHistory, playerScore, aiScore, [Math.floor(moveCell / boardSize), moveCell % boardSize], null);
-      return NextResponse.json({ ok: true, state, analysis: null, lastStats: null, lastLearning: null });
+      // Game over on the mover's move — return a DECISIVE terminal analysis.
+      // (Returning null here made the eval bar show a neutral 50/50 after a
+      // won game — user-reported bug.)
+      const terminalAnalysis = buildTerminalAnalysis({ status, winLine, board: flat, n: boardSize, winLen: winLength });
+      return NextResponse.json({ ok: true, state, analysis: terminalAnalysis, lastStats: null, lastLearning: null });
     }
 
     // ------------------------------------------------------------------
@@ -262,7 +266,8 @@ export async function POST(req: Request) {
       const lm = legalMoves(flat);
       if (!lm.length) {
         const state = buildState(flat, boardSize, winLength, gameMode, playerPiece, aiPiece, "draw", null, null, moveHistory, playerScore, aiScore, [Math.floor(moveCell / boardSize), moveCell % boardSize], null);
-        return NextResponse.json({ ok: true, state, analysis: null, lastStats: null, lastLearning: null });
+        const terminalDraw = buildTerminalAnalysis({ status: "draw", winLine: null, board: flat, n: boardSize, winLen: winLength });
+        return NextResponse.json({ ok: true, state, analysis: terminalDraw, lastStats: null, lastLearning: null });
       }
     }
     flat[aiCell] = aiPiece;
@@ -291,6 +296,15 @@ export async function POST(req: Request) {
           winner = winnerSide;
         }
       }
+    }
+
+    // AI's move ended the game — return the DECISIVE terminal analysis
+    // instead of a pre-terminal evaluation of the position before the
+    // winning move (which understated the result).
+    if (status !== "playing") {
+      const state = buildState(flat, boardSize, winLength, gameMode, playerPiece, aiPiece, status, winner, winLine, moveHistory, playerScore, aiScore, [Math.floor(aiCell / boardSize), aiCell % boardSize], null);
+      const terminalAnalysis = buildTerminalAnalysis({ status, winLine, board: flat, n: boardSize, winLen: winLength });
+      return NextResponse.json({ ok: true, state, analysis: terminalAnalysis, lastStats: null, lastLearning: null });
     }
 
     // ------------------------------------------------------------------

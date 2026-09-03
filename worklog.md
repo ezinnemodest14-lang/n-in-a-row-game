@@ -186,3 +186,23 @@ Stage Summary:
 - Board restored to its 85%-viewport cap during gameplay (slim 32px strip is the only bottom chrome).
 - Lower analysis views on HOVER again (strip hover, eval-bar hover, or click-to-pin; strip pin = overlay only, eval pin = full mode); overlay is translucent acrylic rising above the strip and never auto-opens after moves.
 - Files touched: src/app/page.tsx (state machine v3), src/components/game/AnalysisPanel.tsx (BottomPanel v3: strip + hover overlay, ChevronRight import removed).
+
+---
+Task ID: 11
+Agent: Z.ai Code (main)
+Task: User feedback round 3 — (a) eval bar "confidently wrong" (showed 50.0/50.0 even after the user WON), (b) hovering the side panel forced the bottom panel open
+
+Work Log:
+- Root cause (a): the move route returned `analysis: null` whenever the mover's move ended the game (route L190), the store set analysis null, and EvalBar fell back to `?? 50` → a dead-center 50/50 on a WON board. The AI-win path was also wrong (built the analysis from the PRE-AI-move board, understating the result).
+- Fix (a) server: new `buildTerminalAnalysis()` in analyzer.ts — decisive truth for finished games: won → winProb 100 / evalScore +100 / "You win!" / reasoning names the exact winning line coords (winLine → coordOf); lost → 0 / −100 / "AI wins"; draw → 50 / 0. Wired into ALL THREE game-over exit points in the move route (mover-win early return, AI-no-legal-move draw, new AI-win early return after the AI move).
+- Fix (a) client: EvalBar truth override — reads `status` from the store and forces the display (won→100/+100, lost→0/−100, draw→50/0) regardless of any payload, so the bar can never lie about a finished game. Marker dot now centers on its value line (-translate-y-1/2, both classic + scoring bars) so 100%/0% pegs don't overlap the labels.
+- Fix (a) mid-game decisiveness ("confidently wrong" near 50): buildAnalysis gained board-derived decisive-threat clamps on the blended win prob (position has AI to move): AI completes five this move → aiWinPct ≥ 97; player has ≥2 five-completions (covers existing open fours / double fours) → aiWinPct ≤ 4; player can create an open four on ≥2 distinct lines (no immediate fives) → aiWinPct ≤ 10; mirrored for the AI (double open-four creation → ≥90). Uses classifyBoard CAT.WIN / CAT.OPEN_FOUR on empty cells.
+- Fix (b): page.tsx — BottomPanel visibility is now `hoveredBottom || pinBottom` ONLY (removed hoveredEval/pinEval coupling). Side panel (eval bar) hover/pin opens the QuickView alone; the bottom strip hover/pin opens the analysis overlay alone. EvalBar title tooltips updated ("hover for Quick View").
+- Added dev-only `window.__gameStore` handle (NODE_ENV-guarded) to the store for E2E rigging.
+- Verification: API rigged-win → {status won, winProb 100, "You win!", line H8–M8}; API rigged AI-win (auto, mover=2) → {status lost, winProb 0, "AI wins"}; browser rig via store handle → eval bar renders AI 0.0% / YOU 100.0% with +100 badge, win line ringed, "You win!" strip badge; hover decoupling verified in-browser (eval hover → QuickView open + bottom overlay opacity 0; strip hover → bottom overlay opacity 1 + QuickView closed; leave → both closed); live game through new buildAnalysis clamps (51.6/48.4, no crash); lint clean; zero console errors; NN service healthy.
+- Harness note: agent-browser occasionally relaunches its browser between bash calls (viewport resets to ~577px, virtual mouse cleared) — hover tests must set the viewport and run move+measure atomically in one invocation.
+
+Stage Summary:
+- Eval bar is now truthful at game end (100/0/50 by status, server AND client enforced) and decisive in forced-win positions mid-game (threat clamps).
+- Side panel and bottom panel are fully independent hovers: side hover = QuickView only; strip hover = analysis overlay only; each click pins only itself.
+- Files: analyzer.ts (buildTerminalAnalysis + clamps), api/game/move/route.ts (3 terminal exits), EvalBar.tsx (status override + marker centering + titles), page.tsx (bottomVisible decouple), store (dev handle).

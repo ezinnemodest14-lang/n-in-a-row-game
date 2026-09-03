@@ -375,3 +375,10 @@ export const useGameStore = create<GameStore>((set, get) => ({
   clearTrainingResult: () => set({ trainingResult: null }),
   clearMoveTriggered: () => set({ moveTriggered: 0 }),
 }));
+
+// Dev-only debugging handle (excluded from production builds) — lets the
+// console / E2E checks drive the store directly (e.g. rig a finished game
+// to verify the eval bar's terminal truth override).
+if (process.env.NODE_ENV !== 'production' && typeof window !== 'undefined') {
+  (window as unknown as { __gameStore: typeof useGameStore }).__gameStore = useGameStore;
+}

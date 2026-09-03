@@ -225,6 +225,77 @@ function assessmentFor(evalScore: number): string {
   return a > 30 ? "AI stands better" : "AI slightly better";
 }
 
+// ---------------------------------------------------------------------------
+// Terminal analysis — decisive truth for finished games. The eval bar must
+// never show a neutral 50/50 once the game is over (user-reported bug: a WON
+// game displayed 50.0% / 50.0% because the move route returned analysis:null,
+// and the UI fell back to its 50% default).
+// ---------------------------------------------------------------------------
+
+export function buildTerminalAnalysis(opts: {
+  status: "won" | "lost" | "draw";
+  winLine: [number, number][] | null;
+  board: Int8Array;
+  n: number;
+  winLen: number;
+}): Analysis {
+  const { status, winLine, board, n, winLen } = opts;
+  const line =
+    winLine && winLine.length > 0
+      ? winLine.map(([r, c]) => coordOf(r * n + c, n)).join("–")
+      : "";
+  const outcome = `${winLen} in a row`;
+
+  const base: Analysis = {
+    evalScore: 0,
+    assessment: "Draw",
+    winProb: 50,
+    aiWinProb: 50,
+    moveQuality: "optimal",
+    playerBestMoves: [],
+    aiCandidateMoves: [],
+    playerThreats: emptyThreats(),
+    aiThreats: emptyThreats(),
+    criticalSquares: [],
+    tempo: { playerInitiative: 5, aiInitiative: 5, urgency: "none" },
+    boardControl: buildBoardControl(board, n),
+    scoringAnalysis: null,
+    aiReasoning: "Board full — the game ends in a draw.",
+  };
+
+  if (status === "won") {
+    return {
+      ...base,
+      evalScore: 100,
+      assessment: "You win!",
+      winProb: 100,
+      aiWinProb: 0,
+      moveQuality: "optimal",
+      tempo: { playerInitiative: 10, aiInitiative: 0, urgency: "none" },
+      boardControl: { playerInfluence: 100, aiInfluence: 0, contested: 0, totalCells: n * n },
+      aiReasoning: line
+        ? `You completed ${outcome} at ${line} — game over.`
+        : `You completed ${outcome} — game over.`,
+    };
+  }
+  if (status === "lost") {
+    return {
+      ...base,
+      evalScore: -100,
+      assessment: "AI wins",
+      winProb: 0,
+      aiWinProb: 100,
+      moveQuality: "optimal",
+      tempo: { playerInitiative: 0, aiInitiative: 10, urgency: "none" },
+      boardControl: { playerInfluence: 0, aiInfluence: 100, contested: 0, totalCells: n * n },
+      aiReasoning: line
+        ? `AI completed ${outcome} at ${line} — game over.`
+        : `AI completed ${outcome} — game over.`,
+    };
+  }
+  return base;
+}
+
 export function buildAnalysis(opts: {
   board: Int8Array;
   n: number;
@@ -253,6 +324,38 @@ export function buildAnalysis(opts: {
     const blended1 = 0.6 * mcts.rootWinRate + 0.4 * nnWinProb;
     aiWinPct = Math.round((1 - blended1) * 1000) / 10; // AI perspective = 1 - player1
   }
+
+  // Decisive-threat clamps (user: the bar was "confidently wrong" and hovered
+  // near 50% even in forced-win positions). Sound, board-derived rules —
+  // position has the AI to move:
+  //   • AI completes five this move       → AI has essentially won (≥97%).
+  //   • Player has ≥2 five-completions    → AI can block only one → player wins.
+  //   • Player can create an open four on ≥2 distinct lines and neither side
+  //     has an immediate five → unstoppable next turn → player ~wins.
+  //   • Mirror for the AI (double open-four creation, softer clamp).
+  {
+    let playerFiveCells = 0;
+    let aiFiveCells = 0;
+    let playerOpenFourCreates = 0;
+    let aiOpenFourCreates = 0;
+    for (const [cell, c] of classifyBoard(board, n, 1, winLen)) {
+      if (board[cell] !== 0) continue;
+      if (c.category === CAT.WIN) playerFiveCells++;
+      else if (c.category === CAT.OPEN_FOUR) playerOpenFourCreates++;
+    }
+    for (const [cell, c] of classifyBoard(board, n, 2, winLen)) {
+      if (board[cell] !== 0) continue;
+      if (c.category === CAT.WIN) aiFiveCells++;
+      else if (c.category === CAT.OPEN_FOUR) aiOpenFourCreates++;
+    }
+    if (aiFiveCells > 0) aiWinPct = Math.max(aiWinPct, 97);
+    if (playerFiveCells >= 2) aiWinPct = Math.min(aiWinPct, 4);
+    if (playerOpenFourCreates >= 2 && aiFiveCells === 0 && playerFiveCells === 0)
+      aiWinPct = Math.min(aiWinPct, 10);
+    if (aiOpenFourCreates >= 2 && playerFiveCells === 0 && aiFiveCells === 0)
+      aiWinPct = Math.max(aiWinPct, 90);
+  }
+
   aiWinPct = Math.max(0, Math.min(100, aiWinPct));
   const playerWinPct = 100 - aiWinPct; // derived — bug #17
 

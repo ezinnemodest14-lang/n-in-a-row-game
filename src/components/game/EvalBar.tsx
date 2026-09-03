@@ -48,7 +48,7 @@ function Dots({ color, label, value, dark }: { color: string; label: string; val
 }
 
 export function EvalBar({ isSidePanelVisible }: EvalBarProps) {
-  const { analysis, gameMode, playerScore, aiScore, isThinking } = useGameStore();
+  const { analysis, gameMode, playerScore, aiScore, isThinking, status } = useGameStore();
   const isScoring = gameMode === 'scoring';
 
   // ---- Score Attack: tug-of-war of points ----
@@ -59,13 +59,13 @@ export function EvalBar({ isSidePanelVisible }: EvalBarProps) {
     return (
       <div
         className='flex flex-col items-center w-12 sm:w-14 flex-shrink-0 select-none cursor-pointer relative h-full max-h-[380px]'
-        title='Score balance — hover for the analysis panel'
+        title='Score balance — hover for Quick View'
       >
         <Dots color={AI_GRAD} label='AI' value={String(aiScore.total)} dark />
         <div className='w-8 sm:w-10 flex-1 rounded-full relative overflow-visible shadow-[inset_0_1px_3px_rgba(0,0,0,0.12)]' style={{ background: TRACK_BG, minHeight: 160 }}>
           <motion.div className='absolute top-0 left-0 right-0 rounded-t-full' style={{ background: AI_GRAD }} animate={{ height: `${aiHeight}%` }} transition={SPRING} />
           <motion.div className='absolute bottom-0 left-0 right-0 rounded-b-full' style={{ background: PLAYER_GRAD }} animate={{ height: `${playerRatio * 100}%` }} transition={SPRING} />
-          <motion.div className='absolute left-1/2 -translate-x-1/2 w-4 h-4 sm:w-5 sm:h-5 rounded-full border-2 border-white shadow-md z-10' style={{ background: playerRatio > 0.5 ? '#047857' : '#111827' }} animate={{ bottom: `${playerRatio * 100}%` }} transition={SPRING} />
+          <motion.div className='absolute left-1/2 -translate-x-1/2 -translate-y-1/2 w-4 h-4 sm:w-5 sm:h-5 rounded-full border-2 border-white shadow-md z-10' style={{ background: playerRatio > 0.5 ? '#047857' : '#111827' }} animate={{ bottom: `${playerRatio * 100}%` }} transition={SPRING} />
           <div className='absolute left-1 right-1 top-1/2 h-px bg-white/80 -translate-y-1/2 z-[5]' />
           {isThinking && <PulseDot />}
         </div>
@@ -75,14 +75,18 @@ export function EvalBar({ isSidePanelVisible }: EvalBarProps) {
   }
 
   // ---- Classic mode ----
-  const winProb = analysis?.winProb ?? 50;
-  const evalScore = analysis?.evalScore ?? 0;
+  // TRUTH OVERRIDE: a finished game is a fact, not an estimate. Whatever the
+  // analysis payload says, the bar must show the actual result — won → 100%
+  // YOU, lost → 0%, draw → 50% (user bug: a WON game displayed 50.0/50.0).
+  const terminal = status === 'won' ? 100 : status === 'lost' ? 0 : status === 'draw' ? 50 : null;
+  const winProb = terminal ?? (analysis?.winProb ?? 50);
+  const evalScore = terminal !== null ? (status === 'draw' ? 0 : terminal) : (analysis?.evalScore ?? 0);
   const aiWinPct = 100 - winProb;
 
   return (
     <div
       className='flex flex-col items-center w-12 sm:w-14 flex-shrink-0 select-none cursor-pointer relative group h-full max-h-[380px]'
-      title='Win probability — hover for the analysis panel'
+      title='Win probability — hover for Quick View'
     >
       {/* Hover hint (opacity-only — no layout shift, no jiggle) */}
       <div
@@ -98,7 +102,7 @@ export function EvalBar({ isSidePanelVisible }: EvalBarProps) {
       <div className='w-8 sm:w-10 flex-1 rounded-full relative overflow-visible shadow-[inset_0_1px_3px_rgba(0,0,0,0.12)]' style={{ background: TRACK_BG, minHeight: 160 }}>
         <motion.div className='absolute top-0 left-0 right-0 rounded-t-full' style={{ background: AI_GRAD }} animate={{ height: `${aiWinPct}%` }} transition={SPRING} />
         <motion.div className='absolute bottom-0 left-0 right-0 rounded-b-full' style={{ background: PLAYER_GRAD }} animate={{ height: `${winProb}%` }} transition={SPRING} />
-        <motion.div className='absolute left-1/2 -translate-x-1/2 w-4 h-4 sm:w-5 sm:h-5 rounded-full border-2 border-white shadow-md z-10' style={{ background: winProb > 50 ? '#047857' : '#111827' }} animate={{ bottom: `${winProb}%` }} transition={SPRING} />
+        <motion.div className='absolute left-1/2 -translate-x-1/2 -translate-y-1/2 w-4 h-4 sm:w-5 sm:h-5 rounded-full border-2 border-white shadow-md z-10' style={{ background: winProb > 50 ? '#047857' : '#111827' }} animate={{ bottom: `${winProb}%` }} transition={SPRING} />
         {/* Floating eval badge */}
         {analysis && (
           <div className='absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 z-10'>

@@ -131,9 +131,11 @@ export default function Home() {
   }, [autoPeek, clearPeekTimer]);
 
   // QuickPreview: eval hover, eval pin, or post-move auto-peek (v1).
-  // BottomPanel: eval hover/pin, strip hover, or strip pin (hover-driven).
+  // BottomPanel: strip hover or strip pin ONLY — the side panel and the
+  // bottom panel are fully independent (user: hovering the side panel must
+  // not force the bottom panel open).
   const previewVisible = hoveredEval || pinEval || autoPeek;
-  const bottomVisible = hoveredEval || pinEval || hoveredBottom || pinBottom;
+  const bottomVisible = hoveredBottom || pinBottom;
 
   // ---- boot: start a game on first mount (guarded against StrictMode double-invoke) ----
   useEffect(() => {
@@ -173,8 +175,9 @@ export default function Home() {
         </div>
 
         {/* Slim status strip — in flow BELOW the board (~32px). Hovering it
-            (or the eval bar, or clicking to pin) reveals the analysis
-            overlay, which rises ABOVE the strip over the board's lower edge. */}
+            (or clicking to pin) reveals the analysis overlay, which rises
+            ABOVE the strip over the board's lower edge. Independent of the
+            eval-bar hover, which opens only the Quick View. */}
         <BottomPanel
           visible={bottomVisible}
           onHoverEnter={openBottom}
