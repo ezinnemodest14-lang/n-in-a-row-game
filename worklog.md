@@ -206,3 +206,26 @@ Stage Summary:
 - Eval bar is now truthful at game end (100/0/50 by status, server AND client enforced) and decisive in forced-win positions mid-game (threat clamps).
 - Side panel and bottom panel are fully independent hovers: side hover = QuickView only; strip hover = analysis overlay only; each click pins only itself.
 - Files: analyzer.ts (buildTerminalAnalysis + clamps), api/game/move/route.ts (3 terminal exits), EvalBar.tsx (status override + marker centering + titles), page.tsx (bottomVisible decouple), store (dev handle).
+
+---
+Task ID: 12
+Agent: Z.ai Code (main)
+Task: User — "what is this blind move the ai is making allowing an unstoppable 4? improve the model and retest this exact moves until it learnt not just it" (screenshot: green open three J6-J7-J8, AI replied blind N10)
+
+Work Log:
+- Extracted the EXACT position from the screenshot programmatically (PIL stone-cluster + grid-line/axis-label calibration): black(AI)=2 {D13,H9,K9,H7}, green(You)=1 {G7,J8,J7,L8,J6}; the ringed N10 was the AI's reply to green's J6, which had just created an open three on column J (J5/J9 both empty).
+- Root cause #1 (proven by engine replay, scripts/replay-blind-move.ts): the v3 tactical ladder checked opponent SIMPLE_FOUR cells BEFORE OPEN_FOUR cells and took the first in board-index order → it blocked J10 (a one-move-lagged broken-four point) while the open three's end J9 stayed alive → green J5 makes an OPEN FOUR → lost. Measured: danger(J10)=95 (losing), danger(J9)=0. (The user's live N10 came from a stale pre-restart bundle — current code never skipped the tactical stage — but the underlying block-choice flaw was real and live.)
+- threat-classifier v4: new guaranteed-safety layer — assessMoveDanger (simulate my move → opponent's forcing outlook: 100 = ≥2 five-completions, 95 = live open three remains (open four next), 60 = one forced block, -40/-60 = my own forced win; counter = my threat built, placed cell classified explicitly), chooseSafeDefense (candidates = opp threat points ∪ my four/five points ∪ extras; min danger, tie-break max counter → J9 beats J5 beats J10), ensureSafeMove (final-move guarantee), defenseReason (names the threat ANSWERED, pre-move board).
+- tacticalMove v4: fast mode for playouts (reordered ladder: win → block five → my open four → BLOCK OPP OPEN-FOUR CREATORS → block four creators → forks → open threes); root mode routes all forcing stages through chooseSafeDefense. New MoveReason "counter-four" (+ REASON_TEXT).
+- mcts.ts: playouts use {fast:true}; after tactical override the FINAL pick passes ensureSafeMove (extraCandidates = MCTS top children). When the safety layer overturns the SEARCH's own pick, GlobalRAVE is updated (3× reward for the safe cell, 3× penalty for the blind pick) — online learning so priors shift with repetition.
+- move route: after the NN blend, aiCell passes ensureSafeMove again (blend can no longer ship an unsafe move); overrides are surfaced in aiReasoning ("safety override: …").
+- analyzer clamps tiered + fixed: player clamps gated on aiFiveCells===0 (both-sides-have-fours no longer mislabels an AI win as 4%); tiers 4% (double five-point) / 45% (single blockable four) / 30% (double open-four creation) / 55% (any live player open three); AI mirror ≥90/97 kept.
+- Tests: scripts/replay-blind-move.ts (exact position: tactical=J9 block-open-four, danger table J9=0/J10=95/J5=0/J4=95, ensureSafeMove overturns J10, runMCTS = J9 across 8 seeds incl. noisy RAVE) — ALL PASS; scripts/fuzz-safety.ts (308 random forcing positions: ZERO violations vs best-achievable danger, 214 adversarial blind picks rescued by the safety layer; screenshot chase J9→J4→G9(win)→… all optimal) — PASS; scripts/http-replay.ts (the 5 exact requests through the real route): req5 "you J6 → AI J9 — Shutting down your open three — an open four would have been unstoppable (NN eval 62.7%)", AI win% 30 (was blind 78.3) — PASS.
+- Clean server restart (flushes any stale bundle) via setsid dev.sh; 3000 + NN 3020 healthy; lint clean.
+- Agent Browser: rigged the exact 8-stone position via window.__gameStore, clicked J6 → AI replied J9 (lastMove [6,8], reasoning verbatim, eval 30/70 +83 badge); chase green J5 → AI J4 ("Blocking your winning line", eval 45 per the single-four tier); zero page errors; new-game smoke clean. Screenshot /tmp/verify-j9-block.png.
+
+Stage Summary:
+- The AI can no longer make the "blind move": every selection path (tactical, MCTS, NN blend) ends in ensureSafeMove, and the AI now answers open threes with the SAFE and STRONGEST block (J9 = block + own open three), never a lagged broken-four block while the open four stays available.
+- Generalization proven: 0/308 fuzz violations — an avoidable unstoppable four is ALWAYS avoided, even from adversarial base picks; RAVE learns from every safety override.
+- Eval bar honest in the screenshot position (AI ≤30% with a live open three against it; 45% when a blockable four exists).
+- Files: threat-classifier.ts (v4 layer + tacticalMove v4 + counter-four), mcts.ts (fast playouts + final safety + RAVE learning), api/game/move/route.ts (post-blend safety), analyzer.ts (tiered clamps), scripts/{replay-blind-move,fuzz-safety,http-replay}.ts.

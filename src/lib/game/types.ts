@@ -18,6 +18,7 @@ export type MoveReason =
   | "open-four"
   | "block-four"
   | "block-open-four"
+  | "counter-four"
   | "fork"
   | "block-fork"
   | "block-open-three"

@@ -27,12 +27,23 @@ import {
   checkWinAt,
   cloneBoard,
   emptyBoard,
+  ensureSafeMove,
   legalMoves,
   tacticalMove,
 } from "./threat-classifier";
 
 // Convenience re-exports used by the API routes.
-export { emptyBoard, legalMoves, cloneBoard, checkWinAt, findWinLine, tacticalMove } from "./threat-classifier";
+export {
+  emptyBoard,
+  legalMoves,
+  cloneBoard,
+  checkWinAt,
+  findWinLine,
+  tacticalMove,
+  ensureSafeMove,
+  assessMoveDanger,
+  chooseSafeDefense,
+} from "./threat-classifier";
 export { checkWinAt as winAt } from "./threat-classifier";
 import { computeFullScore, scoreMoveDelta } from "./scoring";
 import type { MctsResult, MoveReason } from "./types";
@@ -161,8 +172,8 @@ function pickPlayoutMove(
   globalRave: GlobalRAVE,
   rng: () => number
 ): number | null {
-  // 1) Tactical overrides (v3 priority chain).
-  const tac = tacticalMove(board, n, winLen, player, opp);
+  // 1) Tactical overrides (v4 priority chain; fast ladder for playout speed).
+  const tac = tacticalMove(board, n, winLen, player, opp, { fast: true });
   if (tac) return tac.cell;
 
   const moves = legalMoves(board);
@@ -476,10 +487,30 @@ export function runMCTS(opts: RunMctsOpts): MctsResult {
   rootChildren.sort((a, b) => b.visits - a.visits);
 
   let reason: MoveReason = "search";
+  const searchPick = bestCell;
   const override = tacticalMove(board, n, winLen, aiPlayer, humanPlayer);
   if (override && board[override.cell] === 0) {
     bestCell = override.cell;
     reason = override.reason;
+  }
+
+  // ---- Safety guarantee (v4) ----
+  // No selection path (search, tactical override, or future blends) may ship
+  // a move that leaves the opponent an unstoppable four while a safer move
+  // exists. If the safety layer overturns the SEARCH's own pick, that lesson
+  // is fed back into GlobalRAVE (boost the safe cell, penalise the blind one)
+  // so repeated play in similar shapes shifts priors — the "learning" half
+  // of the fix alongside the hard rule.
+  const safety = ensureSafeMove(board, n, winLen, aiPlayer, humanPlayer, bestCell, rootChildren.map((r) => r.cell));
+  if (safety.cell !== bestCell) {
+    bestCell = safety.cell;
+    reason = safety.reason;
+    if (searchPick !== bestCell) {
+      for (let k = 0; k < 3; k++) {
+        globalRave.update(aiPlayer, bestCell, 1);
+        if (searchPick >= 0 && board[searchPick] === 0) globalRave.update(aiPlayer, searchPick, 0);
+      }
+    }
   }
   if (bestCell === null || board[bestCell] !== 0) {
     const lm = legalMoves(board);

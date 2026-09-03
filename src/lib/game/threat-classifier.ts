@@ -372,9 +372,192 @@ export function evaluatePosition(
 }
 
 // ---------------------------------------------------------------------------
-// Tactical safety net v3
-// Priority: win → block-win → open-four → block-four → block-open-four
-//           → fork → block-fork → block-open-three
+// Guaranteed-safety layer v4
+//
+// User-reported failure (Task 12): the AI answered an open three by blocking
+// a BROKEN-four point (J10) while the open three's end (J9) stayed alive —
+// the player then made an open four and won. Root cause: the old ladder
+// checked opponent SIMPLE_FOUR cells before OPEN_FOUR cells and picked the
+// first match in board-index order, so a lagged "four creator" was blocked
+// while the immediately-losing "open four creator" survived.
+//
+// The v4 layer evaluates every candidate defense by SIMULATING it and
+// measuring the opponent's forcing outlook afterwards:
+//   danger 100 — opponent would have ≥2 five-completions (lost)
+//   danger  95 — an open three would stay fully alive (open four next, lost)
+//   danger  60 — opponent would have exactly 1 five-completion (forced block)
+//   danger  20 — mutual forcing (I have a five-completion, they an open three)
+//   danger -40 — I would have a five-completion, they no open three (winning)
+//   danger -60 — I would have ≥2 five-completions (strictly winning)
+// Ties break by the counter-threat the move builds (classifyCell score), so
+// J9 (block + own open three) beats J5 (plain block) beats J10 (losing).
+// ---------------------------------------------------------------------------
+
+export interface DefenseCandidate {
+  cell: number;
+  danger: number;
+  counter: number;
+  score: number; // danger * 1e6 - counter (lower is better)
+}
+
+function countCategory(cells: ReturnType<typeof classifyBoard>, category: number): number {
+  let k = 0;
+  for (const [, c] of cells) if (c.category === category) k++;
+  return k;
+}
+
+/** Opponent outlook after `me` plays `cell`. Board is cloned — never mutated. */
+export function assessMoveDanger(
+  board: Int8Array,
+  n: number,
+  winLen: number,
+  cell: number,
+  me: number,
+  opp: number
+): { danger: number; counter: number } {
+  const after = cloneBoard(board);
+  after[cell] = me;
+  const oppCells = classifyBoard(after, n, opp, winLen);
+  const meCells = classifyBoard(after, n, me, winLen);
+  const oppWin = countCategory(oppCells, CAT.WIN);
+  const myWin = countCategory(meCells, CAT.WIN);
+  const oppOpenFour = countCategory(oppCells, CAT.OPEN_FOUR);
+
+  let danger: number;
+  if (oppWin >= 2) danger = 100;
+  else if (oppWin === 1) danger = 60;
+  else if (myWin >= 2) danger = -60;
+  else if (myWin === 1 && oppOpenFour === 0) danger = -40;
+  else if (oppOpenFour >= 1) danger = 95; // live open three → open four next → lost
+  else danger = myWin === 1 ? 20 : 0;
+
+  // Counter value: the threat this move builds for me (+ mild center bias).
+  // NOTE: classifyBoard only classifies EMPTY cells, so the placed cell is
+  // classified explicitly — this is what makes J9's own open three count.
+  const row = Math.floor(cell / n);
+  const col = cell % n;
+  const mine = classifyCell(after, n, row, col, me, winLen);
+  const mid = (n - 1) / 2;
+  const centerBonus = Math.max(0, 4 - (Math.abs(row - mid) + Math.abs(col - mid)) / 2);
+  const counter = mine.score + centerBonus;
+
+  return { danger, counter };
+}
+
+/**
+ * Enumerate every tactically relevant cell (opponent threat points, my own
+ * four/five points, plus any extra candidates) and return the safest and
+ * strongest. Returns null when neither side has forcing moves.
+ */
+export function chooseSafeDefense(
+  board: Int8Array,
+  n: number,
+  winLen: number,
+  me: number,
+  opp: number,
+  extraCandidates: number[] = []
+): DefenseCandidate | null {
+  const cand = new Set<number>();
+  for (const [cell, c] of classifyBoard(board, n, opp, winLen)) {
+    if (c.category >= CAT.SIMPLE_FOUR || c.isFork) cand.add(cell);
+  }
+  for (const [cell, c] of classifyBoard(board, n, me, winLen)) {
+    if (c.category >= CAT.SIMPLE_FOUR || c.isFork) cand.add(cell);
+  }
+  for (const cell of extraCandidates) if (board[cell] === 0) cand.add(cell);
+  if (cand.size === 0) return null;
+
+  let best: DefenseCandidate | null = null;
+  for (const cell of cand) {
+    const { danger, counter } = assessMoveDanger(board, n, winLen, cell, me, opp);
+    const score = danger * 1e6 - counter;
+    if (!best || score < best.score) best = { cell, danger, counter, score };
+  }
+  return best;
+}
+
+/** Names the threat being ANSWERED (pre-move board), or the counter made. */
+function defenseReason(
+  board: Int8Array,
+  n: number,
+  winLen: number,
+  cell: number,
+  me: number,
+  opp: number
+): MoveReason {
+  let seen = 0; // bitmask of threat kinds present before the block
+  for (const [, cc] of classifyBoard(board, n, opp, winLen)) {
+    if (cc.category === CAT.WIN) seen |= 1;
+    else if (cc.category === CAT.OPEN_FOUR) seen |= 2;
+    else if (cc.category === CAT.SIMPLE_FOUR) seen |= 4;
+    else if (cc.category === CAT.OPEN_THREE) seen |= 8;
+  }
+  if (seen & 1) return "block-win";
+  if (seen & 2) return "block-open-four";
+  if (seen & 4) return "block-four";
+  if (seen & 8) return "block-open-three";
+  // Nothing needed blocking — the move is a counter-attack of my own.
+  const after = cloneBoard(board);
+  after[cell] = me;
+  const mine = classifyCell(
+    after,
+    n,
+    Math.floor(cell / n),
+    cell % n,
+    me,
+    winLen
+  );
+  if (mine.category === CAT.WIN) return "win";
+  if (mine.category === CAT.OPEN_FOUR) return "open-four";
+  if (mine.category >= CAT.SIMPLE_FOUR) return "counter-four";
+  if (mine.isFork) return "fork";
+  return "search";
+}
+
+/**
+ * Final-move guarantee: `chosen` is only kept if it is at least as safe as
+ * the best available defense. Used by runMCTS (after search AND tactical
+ * override) and by the move route (after the NN blend) so no selection path
+ * can ship a move that lets the opponent build an unstoppable four.
+ */
+export function ensureSafeMove(
+  board: Int8Array,
+  n: number,
+  winLen: number,
+  me: number,
+  opp: number,
+  chosen: number,
+  extraCandidates: number[] = []
+): { cell: number; changed: boolean; danger: number; reason: MoveReason } {
+  if (board[chosen] !== 0) {
+    const def = chooseSafeDefense(board, n, winLen, me, opp, extraCandidates);
+    if (def) return { cell: def.cell, changed: true, danger: def.danger, reason: defenseReason(board, n, winLen, def.cell, me, opp) };
+    const lm = legalMoves(board);
+    return { cell: lm.length ? lm[0] : chosen, changed: true, danger: 0, reason: "search" };
+  }
+  const chosenScore = assessMoveDanger(board, n, winLen, chosen, me, opp);
+  const def = chooseSafeDefense(board, n, winLen, me, opp, [...extraCandidates, chosen]);
+  if (!def) return { cell: chosen, changed: false, danger: chosenScore.danger, reason: "search" };
+  const chosenTotal = chosenScore.danger * 1e6 - chosenScore.counter;
+  if (def.score < chosenTotal - 1e-9) {
+    return {
+      cell: def.cell,
+      changed: true,
+      danger: def.danger,
+      reason: defenseReason(board, n, winLen, def.cell, me, opp),
+    };
+  }
+  return { cell: chosen, changed: false, danger: chosenScore.danger, reason: "search" };
+}
+
+// ---------------------------------------------------------------------------
+// Tactical safety net v4
+// Fast mode (playouts): pure priority ladder — win → block five → open four
+//   → BLOCK OPEN-FOUR CREATORS → block four creators → forks → open threes.
+//   (The old ladder blocked four creators BEFORE open-four creators — the
+//   exact inversion that let the screenshot position's open three live.)
+// Root mode: forcing situations are resolved through chooseSafeDefense so
+//   the BLOCK CHOICE itself is safety-scored (J9 over J10 over J5).
 // ---------------------------------------------------------------------------
 
 export function tacticalMove(
@@ -382,21 +565,88 @@ export function tacticalMove(
   n: number,
   winLen: number,
   me: number,
-  opp: number
+  opp: number,
+  opts?: { fast?: boolean }
 ): { cell: number; reason: MoveReason } | null {
+  const fast = opts?.fast === true;
   const myCells = classifyBoard(board, n, me, winLen);
   const oppCells = classifyBoard(board, n, opp, winLen);
 
+  // 1) Five now.
   for (const [cell, c] of myCells) if (c.category === CAT.WIN) return { cell, reason: "win" };
-  for (const [cell, c] of oppCells) if (c.category === CAT.WIN) return { cell, reason: "block-win" };
+
+  // 2) Opponent completes five next move — must block a completion point.
+  let oppWinCell: number | null = null;
+  for (const [cell, c] of oppCells)
+    if (c.category === CAT.WIN) {
+      oppWinCell = cell;
+      break;
+    }
+  if (oppWinCell !== null) {
+    if (fast) return { cell: oppWinCell, reason: "block-win" };
+    const def = chooseSafeDefense(board, n, winLen, me, opp);
+    return { cell: def ? def.cell : oppWinCell, reason: "block-win" };
+  }
+
+  // 3) My open four — wins by force (two five-completions at once).
   for (const [cell, c] of myCells)
     if (c.category === CAT.OPEN_FOUR) return { cell, reason: "open-four" };
 
-  // Block fours (solid or broken gap fours are equally urgent).
+  // 4) Opponent open-four creators (live open three ends) — losing if ignored.
+  let oppOpenFourCell: number | null = null;
   for (const [cell, c] of oppCells)
-    if (c.category === CAT.SIMPLE_FOUR) return { cell, reason: "block-four" };
+    if (c.category === CAT.OPEN_FOUR) {
+      oppOpenFourCell = cell;
+      break;
+    }
+  if (oppOpenFourCell !== null) {
+    if (fast) return { cell: oppOpenFourCell, reason: "block-open-four" };
+    const def = chooseSafeDefense(board, n, winLen, me, opp);
+    return { cell: def ? def.cell : oppOpenFourCell, reason: "block-open-four" };
+  }
+
+  // 5) Opponent simple-four creators (one-move lagged fours).
+  let oppFourCell: number | null = null;
   for (const [cell, c] of oppCells)
-    if (c.category === CAT.OPEN_FOUR) return { cell, reason: "block-open-four" };
+    if (c.category === CAT.SIMPLE_FOUR) {
+      oppFourCell = cell;
+      break;
+    }
+  if (oppFourCell !== null) {
+    if (fast) return { cell: oppFourCell, reason: "block-four" };
+    const def = chooseSafeDefense(board, n, winLen, me, opp);
+    return { cell: def ? def.cell : oppFourCell, reason: "block-four" };
+  }
+
+  if (fast) {
+    // 6-8 fast ladder: forks, then open threes (playouts favour diversity).
+    let bestFork: { cell: number; score: number } | null = null;
+    for (const [cell, c] of myCells)
+      if (c.isFork && (!bestFork || c.score > bestFork.score)) bestFork = { cell, score: c.score };
+    if (bestFork) return { cell: bestFork.cell, reason: "fork" };
+    let bestBlockFork: { cell: number; score: number } | null = null;
+    for (const [cell, c] of oppCells)
+      if (c.isFork && (!bestBlockFork || c.score > bestBlockFork.score))
+        bestBlockFork = { cell, score: c.score };
+    if (bestBlockFork) return { cell: bestBlockFork.cell, reason: "block-fork" };
+    for (const [cell, c] of oppCells)
+      if (c.category === CAT.OPEN_THREE) return { cell, reason: "block-open-three" };
+    return null;
+  }
+
+  // Root mode: opponent open threes are answered through the safety-scored
+  // defense (this is where J9 gets chosen over the losing J10/J5 halves).
+  let oppOpenThreeCell: number | null = null;
+  for (const [cell, c] of oppCells)
+    if (c.category === CAT.OPEN_THREE) {
+      oppOpenThreeCell = cell;
+      break;
+    }
+  if (oppOpenThreeCell !== null) {
+    const def = chooseSafeDefense(board, n, winLen, me, opp);
+    if (def) return { cell: def.cell, reason: defenseReason(board, n, winLen, def.cell, me, opp) };
+    return { cell: oppOpenThreeCell, reason: "block-open-three" };
+  }
 
   // My fork — two live threats at once.
   let bestFork: { cell: number; score: number } | null = null;
@@ -405,16 +655,13 @@ export function tacticalMove(
   }
   if (bestFork) return { cell: bestFork.cell, reason: "fork" };
 
-  // v3: block opponent forks (double threats of any type).
+  // Block opponent forks (double threats of any type).
   let bestBlockFork: { cell: number; score: number } | null = null;
   for (const [cell, c] of oppCells) {
     if (c.isFork && (!bestBlockFork || c.score > bestBlockFork.score))
       bestBlockFork = { cell, score: c.score };
   }
   if (bestBlockFork) return { cell: bestBlockFork.cell, reason: "block-fork" };
-
-  for (const [cell, c] of oppCells)
-    if (c.category === CAT.OPEN_THREE) return { cell, reason: "block-open-three" };
 
   return null;
 }
@@ -428,7 +675,8 @@ export const REASON_TEXT: Record<MoveReason, string> = {
   "block-win": "Blocking your winning line — one more move and you'd have won.",
   "open-four": "Creates an open four — unstoppable next turn from either end.",
   "block-four": "Blocking your four before it could complete.",
-  "block-open-four": "Trying to slow an open four — it likely can't be fully stopped now.",
+  "block-open-four": "Shutting down your open three — an open four would have been unstoppable.",
+  "counter-four": "Counter-attacks with a four of my own — you must answer, then I handle your threat.",
   fork: "Creates a fork — two live threats at once, so only one can be blocked.",
   "block-fork": "Blocking your fork before two threats become unstoppable.",
   "block-open-three": "Blocking your open three before it becomes an open four.",

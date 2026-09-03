@@ -349,9 +349,15 @@ export function buildAnalysis(opts: {
       else if (c.category === CAT.OPEN_FOUR) aiOpenFourCreates++;
     }
     if (aiFiveCells > 0) aiWinPct = Math.max(aiWinPct, 97);
-    if (playerFiveCells >= 2) aiWinPct = Math.min(aiWinPct, 4);
-    if (playerOpenFourCreates >= 2 && aiFiveCells === 0 && playerFiveCells === 0)
-      aiWinPct = Math.min(aiWinPct, 10);
+    // Player-side clamps only apply while the AI cannot five first.
+    if (aiFiveCells === 0) {
+      if (playerFiveCells >= 2) aiWinPct = Math.min(aiWinPct, 4);
+      else if (playerFiveCells === 1) aiWinPct = Math.min(aiWinPct, 45); // blockable four — AI must answer now
+      if (playerFiveCells === 0 && playerOpenFourCreates >= 2)
+        aiWinPct = Math.min(aiWinPct, 30); // live open three(s): forcing, but blockable — never "AI winning"
+      if (playerOpenFourCreates >= 1 && playerFiveCells === 0 && aiOpenFourCreates === 0)
+        aiWinPct = Math.min(aiWinPct, 55); // any live player open three caps AI optimism
+    }
     if (aiOpenFourCreates >= 2 && playerFiveCells === 0 && aiFiveCells === 0)
       aiWinPct = Math.max(aiWinPct, 90);
   }

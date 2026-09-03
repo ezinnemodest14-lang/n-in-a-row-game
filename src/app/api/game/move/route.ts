@@ -7,7 +7,8 @@
 
 import { NextResponse } from "next/server";
 import { boardToInt8, int8ToBoard } from "@/lib/game/types";
-import { cloneBoard, findWinLine, legalMoves, runMCTS, checkWinAt } from "@/lib/game/mcts";
+import { cloneBoard, findWinLine, legalMoves, runMCTS, checkWinAt, ensureSafeMove } from "@/lib/game/mcts";
+import { REASON_TEXT } from "@/lib/game/threat-classifier";
 import { scoreMoveDelta, computeFullScore, scoreBreakdown } from "@/lib/game/scoring";
 import { buildAnalysis, buildLearningSnapshot, buildTerminalAnalysis } from "@/lib/game/analyzer";
 import { loadRave, saveRave } from "@/lib/game/engine-runtime";
@@ -260,6 +261,33 @@ export async function POST(req: Request) {
           nnReRank = { agreed: true, to: coord(best.cell), candidates: blend.length };
         }
       }
+    }
+
+    // ------------------------------------------------------------------
+    // 2c) Final safety guarantee — the NN blend (or any earlier stage) can
+    // never ship a move that leaves the player an unstoppable four. If this
+    // overrides the blended pick, say so in the reasoning.
+    // ------------------------------------------------------------------
+    const coordLabelFor = (cell: number) => {
+      const r = Math.floor(cell / boardSize);
+      const c = cell % boardSize;
+      const letter = String.fromCharCode(65 + (c >= 8 ? c + 1 : c));
+      return `${letter}${boardSize - r}`;
+    };
+    const safety = ensureSafeMove(
+      boardBefore,
+      boardSize,
+      winLength,
+      aiPiece,
+      playerPiece,
+      aiCell,
+      res.topChildren.map((t) => t.cell)
+    );
+    if (safety.cell !== aiCell) {
+      reasoningSuffix += ` — safety override: ${coordLabelFor(aiCell)} would have allowed a forcing ${
+        safety.danger >= 95 ? "(losing)" : ""
+      } threat; ${coordLabelFor(safety.cell)} played instead (${REASON_TEXT[safety.reason] ?? "forced reply"}).`;
+      aiCell = safety.cell;
     }
 
     if (flat[aiCell] !== 0) {
