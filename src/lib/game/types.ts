@@ -97,6 +97,24 @@ export interface ThreatCounts {
   HalfOpenThree: number;
 }
 
+/**
+ * A move suggestion scored by the neural net. Produced AFTER the AI's move
+ * (i.e. for the player's next turn) by NN-evaluating the position that
+ * results from each candidate — the number is the PLAYER's win probability
+ * (0..100) according to the network, so higher = better for you.
+ */
+export interface NnSuggestion {
+  row: number;
+  col: number;
+  /** NN win probability for the player after this move, 0..100. */
+  nnWinProb: number;
+  /** Tactical label from the threat classifier (e.g. "Open three — …"). */
+  tag: string;
+  isFork?: boolean;
+  /** True when the NN's #1 pick also matches the threat classifier's top cell. */
+  tactical?: boolean;
+}
+
 /** The full analysis object rendered by the analysis UI. */
 export interface Analysis {
   evalScore: number; // signed display score, positive = player ahead
@@ -121,6 +139,11 @@ export interface Analysis {
     to?: string; // final pick coord
     candidates: number; // how many candidates the NN scored
   };
+  /** NN-scored suggestions for the player's NEXT move (empty in scoring
+   *  mode or when the NN service is unavailable). */
+  nnSuggestions?: NnSuggestion[];
+  /** NN service metadata (params / training samples), when available. */
+  nnMeta?: { params: number; trainingSamples: number } | null;
 }
 
 /** Search telemetry (rendered as sims/sec etc.). */
@@ -197,6 +220,53 @@ export interface GameStatePayload {
 export interface ScoreState {
   total: number;
   breakdown: { fives: number; fours: number; triples: number };
+}
+
+// ---------------------------------------------------------------------------
+// Game review (NN replay) — produced by POST /api/game/review
+// ---------------------------------------------------------------------------
+
+export type ReviewGrade =
+  | "brilliant" // took the win / best tactical shot
+  | "great" // clear eval gain
+  | "good" // roughly neutral, sound
+  | "inaccuracy" // small eval loss
+  | "mistake" // significant eval loss / allowed a strong threat
+  | "blunder"; // missed a win or missed a forced block
+
+/** One graded move in the review. */
+export interface GameReviewMove {
+  moveNo: number; // 1-based
+  player: number; // 1 = human, 2 = AI
+  row: number;
+  col: number;
+  coord: string; // e.g. "H8"
+  grade: ReviewGrade;
+  /** Eval swing from the MOVER's perspective, in win-% points. */
+  delta: number;
+  winProbBefore: number; // player perspective, 0..100
+  winProbAfter: number; // player perspective, 0..100
+  headline: string; // e.g. "Missed the winning move at J9"
+}
+
+/** Full NN game review payload. */
+export interface GameReviewData {
+  usedNn: boolean; // true = neural net scored every position
+  accuracy: { player: number; ai: number }; // 0..100
+  grades: {
+    player: Partial<Record<ReviewGrade, number>>;
+    ai: Partial<Record<ReviewGrade, number>>;
+  };
+  /** Win-prob curve (player perspective) AFTER each move; index 0 = start (50). */
+  points: { move: number; winProb: number }[];
+  moves: GameReviewMove[];
+  summary: string[]; // 1-3 human-readable takeaways
+}
+
+export interface ReviewResponse {
+  ok: boolean;
+  review?: GameReviewData;
+  error?: string;
 }
 
 // ---------------------------------------------------------------------------

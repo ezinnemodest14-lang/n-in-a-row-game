@@ -8,10 +8,11 @@ import {
   ChevronUp, ChevronDown, TrendingUp, Eye, Lightbulb, AlertTriangle,
   Award, Clock, Activity, Layers, Sparkles, Info, Crosshair,
   Map, Sword, Gauge, CheckCircle2, History, MessageSquare,
-  Trophy, Minus, Loader2
+  Trophy, Minus, Loader2, Play, BrainCircuit
 } from 'lucide-react';
 import { coordLabel } from '@/lib/game/threat-classifier';
 import type { PlayerBestMove, ScoringAnalysis, CriticalSquare } from '@/lib/game/threat-classifier';
+import type { GameReviewData, GameReviewMove, ReviewGrade, NnSuggestion } from '@/lib/game/types';
 import { motion, AnimatePresence } from 'framer-motion';
 
 const PLAYER_DOT = 'bg-gradient-to-br from-emerald-400 to-emerald-600';
@@ -417,6 +418,219 @@ function StrategicNarrative() {
 }
 
 // ==================================================
+// GAME REVIEW (NN replay) — eval graph + graded moves
+// ==================================================
+
+const GRADE_STYLES: Record<ReviewGrade, { label: string; chip: string }> = {
+  brilliant: { label: 'Brilliant', chip: 'bg-violet-100 text-violet-700 border-violet-200' },
+  great: { label: 'Great', chip: 'bg-emerald-100 text-emerald-700 border-emerald-200' },
+  good: { label: 'Good', chip: 'bg-sky-100 text-sky-700 border-sky-200' },
+  inaccuracy: { label: 'Inaccuracy', chip: 'bg-amber-100 text-amber-700 border-amber-200' },
+  mistake: { label: 'Mistake', chip: 'bg-orange-100 text-orange-700 border-orange-200' },
+  blunder: { label: 'Blunder', chip: 'bg-red-100 text-red-700 border-red-200' },
+};
+
+function GradeChip({ grade, className }: { grade: ReviewGrade; className?: string }) {
+  const g = GRADE_STYLES[grade];
+  return (
+    <span className={cn('text-[9px] font-bold px-1.5 py-0.5 rounded-full border whitespace-nowrap', g.chip, className)}>
+      {g.label}
+    </span>
+  );
+}
+
+/** Win-probability area chart (player perspective) across the whole game. */
+function EvalGraph({ points }: { points: { move: number; winProb: number }[] }) {
+  if (points.length < 2) return null;
+  const W = 300;
+  const H = 76;
+  const pad = 3;
+  const stepX = (W - pad * 2) / (points.length - 1);
+  const yOf = (wp: number) => pad + (1 - Math.max(0, Math.min(100, wp)) / 100) * (H - pad * 2);
+  const coords = points.map((p, i) => `${(pad + i * stepX).toFixed(2)},${yOf(p.winProb).toFixed(2)}`);
+  const line = `M ${coords.join(' L ')}`;
+  const area = `${line} L ${(W - pad).toFixed(2)},${H - pad} L ${pad},${H - pad} Z`;
+  const lastPt = points[points.length - 1];
+  const lastX = pad + (points.length - 1) * stepX;
+  const lastY = yOf(lastPt.winProb);
+  return (
+    <svg viewBox={`0 0 ${W} ${H}`} className='w-full h-16' preserveAspectRatio='none' role='img' aria-label='Win probability graph over the game'>
+      <defs>
+        <linearGradient id='evalFill' x1='0' y1='0' x2='0' y2='1'>
+          <stop offset='0%' stopColor='#10b981' stopOpacity='0.32' />
+          <stop offset='100%' stopColor='#10b981' stopOpacity='0.02' />
+        </linearGradient>
+      </defs>
+      {/* 50% midline */}
+      <line x1={pad} y1={yOf(50)} x2={W - pad} y2={yOf(50)} stroke='#1c1917' strokeOpacity='0.18' strokeDasharray='4 4' strokeWidth='1' />
+      <path d={area} fill='url(#evalFill)' />
+      <path d={line} fill='none' stroke='#059669' strokeWidth='1.8' strokeLinejoin='round' strokeLinecap='round' />
+      <circle cx={lastX} cy={lastY} r='3' fill={lastPt.winProb >= 50 ? '#047857' : '#374151'} stroke='#fff' strokeWidth='1.5' />
+    </svg>
+  );
+}
+
+function ReviewMoveRow({ m, boardSize }: { m: GameReviewMove; boardSize: number }) {
+  const isPlayer = m.player === 1;
+  return (
+    <div className={cn(
+      'flex items-center gap-2 px-1.5 py-1 rounded-lg',
+      m.grade === 'blunder' ? 'bg-red-50/70' : m.grade === 'brilliant' ? 'bg-violet-50/70' : 'hover:bg-white/40'
+    )}>
+      <span className='text-muted-foreground font-mono w-6 text-right shrink-0 text-[10px]'>#{m.moveNo}</span>
+      <div className={cn('w-2 h-2 rounded-full shrink-0', isPlayer ? PLAYER_DOT : AI_DOT)} />
+      <span className='font-mono font-bold text-[11px] w-8 shrink-0'>{m.coord || coordLabel(m.row, m.col, boardSize)}</span>
+      <GradeChip grade={m.grade} />
+      <span className={cn(
+        'font-mono text-[10px] w-12 text-right shrink-0',
+        m.delta >= 0 ? 'text-emerald-600' : 'text-red-500'
+      )}>
+        {m.delta >= 0 ? '+' : ''}{m.delta.toFixed(1)}
+      </span>
+      <span className='flex-1 text-[10px] text-foreground/60 truncate text-right' title={m.headline}>{m.headline}</span>
+    </div>
+  );
+}
+
+function GameReviewSection() {
+  const { review, reviewLoading, moveHistory, boardSize, runReview } = useGameStore();
+
+  if (reviewLoading) {
+    return (
+      <div className='flex items-center justify-center gap-2 py-4'>
+        <Loader2 className='w-4 h-4 animate-spin text-violet-500' />
+        <span className='text-[11px] text-muted-foreground'>
+          Replaying {moveHistory.length} moves through the neural net…
+        </span>
+      </div>
+    );
+  }
+
+  if (!review) {
+    return (
+      <div className='space-y-2'>
+        <p className='text-[11px] text-foreground/65 leading-relaxed'>
+          Replays every position of this game through the neural net to grade each move,
+          chart the win-probability swing, and score both sides&apos; accuracy — like a
+          chess-style game review, but for {boardSize}×{boardSize} Gomoku.
+        </p>
+        <button
+          onClick={() => void runReview()}
+          disabled={moveHistory.length === 0}
+          className='inline-flex items-center gap-2 text-[11px] font-bold px-3 py-1.5 rounded-full bg-violet-500 text-white hover:bg-violet-600 disabled:opacity-40 disabled:cursor-not-allowed transition-colors cursor-pointer'
+        >
+          <Play className='w-3.5 h-3.5' />
+          Run NN Game Review
+        </button>
+      </div>
+    );
+  }
+
+  const gr = review;
+  const gradeEntries = (grades: Partial<Record<ReviewGrade, number>>) =>
+    (['brilliant', 'great', 'good', 'inaccuracy', 'mistake', 'blunder'] as ReviewGrade[])
+      .filter((g) => (grades[g] ?? 0) > 0)
+      .map((g) => ({ grade: g, count: grades[g] ?? 0 }));
+
+  return (
+    <div className='space-y-2.5'>
+      {/* Accuracy summary */}
+      <div className='grid grid-cols-2 gap-2'>
+        {([
+          { label: 'You', acc: gr.accuracy.player, grades: gr.grades.player, dot: PLAYER_DOT },
+          { label: 'AI', acc: gr.accuracy.ai, grades: gr.grades.ai, dot: AI_DOT },
+        ] as const).map((side) => (
+          <div key={side.label} className='bg-white/40 dark:bg-white/5 rounded-xl p-2 space-y-1.5'>
+            <div className='flex items-center gap-1.5'>
+              <div className={cn('w-2.5 h-2.5 rounded-full', side.dot)} />
+              <span className='text-[10px] font-bold text-muted-foreground'>{side.label}</span>
+              <span className='ml-auto text-sm font-mono font-bold text-foreground'>{side.acc.toFixed(1)}%</span>
+            </div>
+            <div className='h-1.5 bg-slate-200/70 rounded-full overflow-hidden'>
+              <motion.div
+                className={cn('h-full rounded-full', side.label === 'You' ? 'bg-gradient-to-r from-emerald-400 to-emerald-600' : 'bg-gradient-to-r from-slate-400 to-slate-600')}
+                initial={{ width: 0 }}
+                animate={{ width: `${side.acc}%` }}
+                transition={{ duration: 0.6 }}
+              />
+            </div>
+            <div className='flex flex-wrap gap-1'>
+              {gradeEntries(side.grades).map(({ grade, count }) => (
+                <span key={grade} className='inline-flex items-center gap-0.5'>
+                  <GradeChip grade={grade} />
+                  <span className='text-[9px] font-mono text-muted-foreground'>{count}</span>
+                </span>
+              ))}
+            </div>
+          </div>
+        ))}
+      </div>
+
+      {/* Eval curve */}
+      <div className='bg-white/40 dark:bg-white/5 rounded-xl p-2'>
+        <div className='flex items-center justify-between mb-1'>
+          <span className='text-[9px] font-bold uppercase tracking-wider text-muted-foreground'>Win probability — whole game</span>
+          <span className={cn(
+            'text-[8px] font-bold px-1.5 py-0.5 rounded-full',
+            gr.usedNn ? 'bg-violet-100 text-violet-700' : 'bg-amber-100 text-amber-700'
+          )}>
+            {gr.usedNn ? 'NEURAL NET' : 'HEURISTIC'}
+          </span>
+        </div>
+        <EvalGraph points={gr.points} />
+        <div className='flex justify-between text-[8px] text-muted-foreground/70'>
+          <span>start</span>
+          <span>move {gr.points.length - 1}</span>
+        </div>
+      </div>
+
+      {/* Takeaways */}
+      <div className='bg-gradient-to-br from-violet-50/80 to-sky-50/40 rounded-xl p-2 border border-violet-100/50'>
+        {gr.summary.map((s, i) => (
+          <p key={i} className='text-[10px] text-foreground/75 leading-relaxed'>{s}</p>
+        ))}
+      </div>
+
+      {/* Graded move list — chronological, scrollable */}
+      <div className='space-y-0.5 max-h-64 overflow-y-auto scrollbar-thin pr-0.5'>
+        {gr.moves.map((m) => <ReviewMoveRow key={m.moveNo} m={m} boardSize={boardSize} />)}
+      </div>
+    </div>
+  );
+}
+
+// ==================================================
+// NN-ranked suggestions (bottom panel variant)
+// ==================================================
+
+function NnSuggestionRow({ s, rank, boardSize }: { s: NnSuggestion; rank: number; boardSize: number }) {
+  return (
+    <div className={cn(
+      'flex items-center gap-2 text-[11px] py-1 px-1.5 rounded-lg',
+      rank === 0 ? 'bg-violet-50/70 border border-violet-200/50' : 'hover:bg-white/40'
+    )}>
+      <span className={cn(
+        'w-4 h-4 rounded-full text-[8px] font-bold flex items-center justify-center shrink-0',
+        rank === 0 ? 'bg-violet-500 text-white' : 'bg-muted text-muted-foreground'
+      )}>{rank + 1}</span>
+      <span className='font-mono font-bold text-foreground w-8 shrink-0'>{coordLabel(s.row, s.col, boardSize)}</span>
+      <span className='flex-1 text-foreground/65 truncate'>{s.tag}</span>
+      {s.tactical && <span className='text-[8px] font-bold text-emerald-600 bg-emerald-50 px-1 py-0.5 rounded-full shrink-0'>ENGINE ✓</span>}
+      <div className='w-14 h-1.5 bg-slate-200/70 rounded-full overflow-hidden shrink-0'>
+        <motion.div
+          className='h-full rounded-full'
+          style={{ background: 'linear-gradient(90deg, #a78bfa, #7c3aed)' }}
+          initial={{ width: 0 }}
+          animate={{ width: `${s.nnWinProb}%` }}
+          transition={{ duration: 0.4 }}
+        />
+      </div>
+      <span className='font-mono font-bold text-violet-600 w-11 text-right shrink-0'>{s.nnWinProb.toFixed(1)}%</span>
+    </div>
+  );
+}
+
+// ==================================================
 // MAIN ANALYSIS PANEL (no hover/overlay — flow element)
 // ==================================================
 
@@ -431,7 +645,10 @@ export function AnalysisPanel() {
     evalScore, winProb, assessment, aiReasoning, playerBestMoves,
     aiCandidateMoves, playerThreats, aiThreats, scoringAnalysis,
     moveQuality, criticalSquares, boardControl, tempo,
+    nnSuggestions, nnMeta,
   } = analysis;
+
+  const nnPicks: NnSuggestion[] = nnSuggestions ?? [];
 
   const mq = moveQuality || 'optimal';
   const sqs = criticalSquares || [];
@@ -470,6 +687,13 @@ export function AnalysisPanel() {
 
   return (
     <AcrylicCard className='p-3 space-y-3'>
+      {/* 0. Game Review — NN replay of the whole game (NEW) */}
+      <Collapsible title='Game Review · NN' icon={BrainCircuit} accent='text-violet-500' defaultOpen={false}
+        badge={<span className='text-[9px] font-bold px-1.5 py-0.5 rounded-full bg-violet-100 text-violet-700'>NEURAL NET</span>}
+      >
+        <GameReviewSection />
+      </Collapsible>
+
       {/* 1. Strategic Narrative — NEW verbose overview */}
       <Collapsible title='Strategic Overview' icon={MessageSquare} accent='text-amber-500' defaultOpen={false}
         badge={<span className={cn('text-[10px] font-mono font-bold', evalColor)}>{evalScore > 0 ? `+${evalScore}` : evalScore}</span>}
@@ -554,9 +778,11 @@ export function AnalysisPanel() {
         </Collapsible>
       )}
 
-      {/* 8. Player Best Options */}
-      <Collapsible title={isScoring ? 'Best Scoring Moves' : 'Your Best Options'} icon={Target} accent='text-emerald-500' defaultOpen={false}
-        badge={playerBestMoves.length > 0 ? <span className='text-[10px] text-emerald-600 font-mono'>{playerBestMoves.length} moves</span> : undefined}
+      {/* 8. Player Best Options — NN-ranked when available */}
+      <Collapsible title={isScoring ? 'Best Scoring Moves' : nnPicks.length > 0 ? 'Your Best Moves · NN Ranked' : 'Your Best Options'} icon={Target} accent='text-emerald-500' defaultOpen={false}
+        badge={nnPicks.length > 0
+          ? <span className='text-[9px] font-bold px-1.5 py-0.5 rounded-full bg-violet-100 text-violet-700'>NN</span>
+          : playerBestMoves.length > 0 ? <span className='text-[10px] text-emerald-600 font-mono'>{playerBestMoves.length} moves</span> : undefined}
       >
         {isScoring && scoringAnalysis ? (
           <div className='space-y-0.5'>
@@ -569,6 +795,15 @@ export function AnalysisPanel() {
                 </div>
               ))
               : <span className='text-[11px] text-muted-foreground italic'>No scoring opportunities detected yet. Focus on building triples and fours.</span>}
+          </div>
+        ) : nnPicks.length > 0 ? (
+          <div className='space-y-0.5'>
+            {nnPicks.map((s, i) => <NnSuggestionRow key={i} s={s} rank={i} boardSize={boardSize} />)}
+            {nnMeta && (
+              <p className='text-[8px] text-muted-foreground/70 text-center pt-1'>
+                Ranked by the neural net — {nnMeta.params.toLocaleString()} params · {(nnMeta.trainingSamples / 1000).toFixed(1)}k training samples
+              </p>
+            )}
           </div>
         ) : (
           <div className='space-y-0.5'>
@@ -735,7 +970,7 @@ export function BottomPanel({ visible, onHoverEnter, onHoverLeave, onTogglePin }
               </div>
               <div className='border-t border-white/30 px-3 py-1'>
                 <p className='text-[9px] text-muted-foreground/70 text-center'>
-                  MCTS + RAVE (Gelly &amp; Silver) · Neural-net blend (60/40) · Threat Classifier · Global learning
+                  MCTS + RAVE (Gelly &amp; Silver) · Neural-net blend (60/40) · NN move suggestions · NN game review · Global learning
                 </p>
               </div>
             </>

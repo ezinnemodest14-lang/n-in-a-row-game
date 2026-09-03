@@ -12,6 +12,7 @@ import type {
   GameMode,
   GameStatePayload,
   GameStatus,
+  GameReviewData,
   LearningSnapshot,
   MoveRecord,
   ScoreState,
@@ -49,6 +50,12 @@ export interface TrainResponse {
   error?: string;
 }
 
+export interface ReviewApiResponse {
+  ok: boolean;
+  review?: GameReviewData;
+  error?: string;
+}
+
 // ---------------------------------------------------------------------------
 // Store shape
 // ---------------------------------------------------------------------------
@@ -78,6 +85,9 @@ interface GameStore {
   lastLearning: LearningSnapshot | null;
   learningHistory: LearningSnapshot[];
   analysis: Analysis | null;
+  /** NN game review (chess.com-style) — null until a review has been run. */
+  review: GameReviewData | null;
+  reviewLoading: boolean;
   playerScore: ScoreState;
   aiScore: ScoreState;
   crossGameLearning: { inherited: boolean; priorVisits: number } | null;
@@ -97,6 +107,8 @@ interface GameStore {
   makeMove: (row: number, col: number) => Promise<void>;
   /** Plays for the current player (used by Auto Mode / AI-vs-AI). */
   playAuto: () => Promise<void>;
+  /** Replays the finished/current game through the NN for the Game Review. */
+  runReview: () => Promise<void>;
   newGame: () => Promise<void>;
   setGameMode: (m: GameMode) => void;
   setAutoMode: (b: boolean) => void;
@@ -141,6 +153,8 @@ export const useGameStore = create<GameStore>((set, get) => ({
   lastLearning: null,
   learningHistory: [],
   analysis: null,
+  review: null,
+  reviewLoading: false,
   playerScore: emptyScore(),
   aiScore: emptyScore(),
   crossGameLearning: null,
@@ -219,6 +233,8 @@ export const useGameStore = create<GameStore>((set, get) => ({
         isThinking: false,
         moveTriggered: get().moveTriggered + 1,
       });
+      // Game over → automatically run the NN game review.
+      if (data.state.status !== 'playing') void get().runReview();
     } catch {
       // Auto-recovery: revert to the exact pre-move state.
       set({
@@ -270,14 +286,41 @@ export const useGameStore = create<GameStore>((set, get) => ({
         isThinking: false,
         moveTriggered: get().moveTriggered + 1,
       });
+      // Game over → automatically run the NN game review.
+      if (data.state.status !== 'playing') void get().runReview();
     } catch {
       set({ isThinking: false });
     }
   },
 
+  runReview: async () => {
+    const s = get();
+    if (s.reviewLoading || s.moveHistory.length === 0) return;
+    set({ reviewLoading: true });
+    try {
+      const res = await fetch('/api/game/review', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          moveHistory: s.moveHistory,
+          boardSize: s.boardSize,
+          winLength: s.winLength,
+          gameMode: s.gameMode,
+          playerPiece: s.playerPiece,
+          aiPiece: s.aiPiece,
+        }),
+      });
+      const data: ReviewApiResponse = await res.json();
+      if (!res.ok || !data.ok) throw new Error(data.error || 'Review failed');
+      set({ review: data.review ?? null, reviewLoading: false });
+    } catch {
+      set({ reviewLoading: false });
+    }
+  },
+
   newGame: async () => {
     const s = get();
-    set({ isInitializing: true, status: 'idle', analysis: null, winLine: null, winner: null });
+    set({ isInitializing: true, status: 'idle', analysis: null, winLine: null, winner: null, review: null, reviewLoading: false });
     try {
       const res = await fetch('/api/game/new', {
         method: 'POST',

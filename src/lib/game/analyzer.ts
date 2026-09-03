@@ -30,6 +30,7 @@ import type {
   ThreatCounts,
 } from "./types";
 import type { GlobalRAVE } from "./mcts";
+import type { NnSuggestion } from "./types";
 import { REASON_TEXT } from "./threat-classifier";
 
 function emptyThreats(): ThreatCounts {
@@ -312,8 +313,12 @@ export function buildAnalysis(opts: {
   reasoningSuffix?: string;
   /** NN blend outcome, echoed verbatim into the analysis payload. */
   nnReRank?: Analysis["nnReRank"];
+  /** NN-scored suggestions for the player's next move (post-AI-move board). */
+  nnSuggestions?: NnSuggestion[];
+  /** NN service metadata (params / training samples). */
+  nnMeta?: { params: number; trainingSamples: number } | null;
 }): Analysis {
-  const { board, n, winLen, mode, mcts, playerTotal, aiTotal, nnWinProb, finalMove, reasoningSuffix, nnReRank } = opts;
+  const { board, n, winLen, mode, mcts, playerTotal, aiTotal, nnWinProb, finalMove, reasoningSuffix, nnReRank, nnSuggestions, nnMeta } = opts;
 
   const ev = evaluatePosition(board, n, winLen);
 
@@ -414,6 +419,8 @@ export function buildAnalysis(opts: {
     scoringAnalysis,
     aiReasoning,
     nnReRank,
+    nnSuggestions: nnSuggestions ?? [],
+    nnMeta: nnMeta ?? null,
   };
 }
 

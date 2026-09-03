@@ -6,10 +6,12 @@
  * must only ever serve relative-path JSON APIs on this fixed port.
  *
  * Routes (all JSON, CORS-enabled for any origin):
- *   GET  /health   → service + model status
- *   POST /predict  → { board, n } ⇒ { winProb1, featuresUsed, tookMs }
- *   POST /train    → self-play data generation + mini-batch training,
- *                    persists weights to ./nn-model-weights.json
+ *   GET  /health         → service + model status
+ *   POST /predict        → { board, n } ⇒ { winProb1, featuresUsed, tookMs }
+ *   POST /predict-batch  → { boards: number[][][], n } ⇒ { winProbs1, tookMs }
+ *                          (used by the game-review replay)
+ *   POST /train          → self-play data generation + mini-batch training,
+ *                          persists weights to ./nn-model-weights.json
  *
  * On startup the service tries to restore nn-model-weights.json (silent
  * fallback to the deterministic seeded init if the file is missing/corrupt).
@@ -151,6 +153,36 @@ async function handlePredict(req: Request): Promise<Response> {
   const winProb1 = net.forward(features);
   const tookMs = Number((performance.now() - t0).toFixed(3));
   return json({ winProb1, featuresUsed: true, tookMs });
+}
+
+// ──────────────────────────── /predict-batch ────────────────────────────────
+
+const MAX_BATCH = 800; // a full 24×24 board game is ≤ 577 positions
+
+async function handlePredictBatch(req: Request): Promise<Response> {
+  const body = await readJson(req);
+  const raw = body.boards;
+  if (!Array.isArray(raw) || raw.length === 0) {
+    throw new HttpError(400, 'body.boards must be a non-empty array of boards');
+  }
+  if (raw.length > MAX_BATCH) {
+    throw new HttpError(400, `body.boards must contain at most ${MAX_BATCH} boards`);
+  }
+  const n =
+    typeof body.n === 'number' && Number.isFinite(body.n) && body.n >= 1
+      ? Math.floor(body.n)
+      : 0;
+  if (n < 1 || n > 30) throw new HttpError(400, 'body.n must be 1..30');
+
+  const t0 = performance.now();
+  const winProbs1: number[] = new Array<number>(raw.length);
+  for (let i = 0; i < raw.length; i++) {
+    // Reuse parseBoard's normalization per board by wrapping it.
+    const { board } = parseBoard({ board: raw[i], n });
+    winProbs1[i] = net.forward(extractFeatures(board, n));
+  }
+  const tookMs = Number((performance.now() - t0).toFixed(3));
+  return json({ winProbs1, count: winProbs1.length, tookMs });
 }
 
 // ───────────────────── Self-play playout data generator ─────────────────────
@@ -364,6 +396,7 @@ async function main(): Promise<void> {
       try {
         if (pathname === '/health' && req.method === 'GET') return json(healthPayload());
         if (pathname === '/predict' && req.method === 'POST') return await handlePredict(req);
+        if (pathname === '/predict-batch' && req.method === 'POST') return await handlePredictBatch(req);
         if (pathname === '/train' && req.method === 'POST') return await handleTrain(req);
         return json({ ok: false, error: `no route for ${req.method} ${pathname}` }, 404);
       } catch (err) {

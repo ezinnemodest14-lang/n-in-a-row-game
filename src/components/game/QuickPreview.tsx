@@ -5,11 +5,12 @@ import { cn } from '@/lib/utils';
 import {
   Brain, Target, Shield, Zap, Activity,
   Eye, Crosshair, Gauge, Map, Sword,
-  TrendingDown, TrendingUp, Minus
+  TrendingDown, TrendingUp, Minus, Sparkles
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { coordLabel } from '@/lib/game/threat-classifier';
 import type { CriticalSquare } from '@/lib/game/threat-classifier';
+import type { NnSuggestion } from '@/lib/game/types';
 
 const PLAYER_DOT = 'bg-gradient-to-br from-emerald-400 to-emerald-600';
 const AI_DOT = 'bg-gradient-to-br from-slate-600 to-slate-800';
@@ -26,7 +27,10 @@ export function QuickPreview({ visible }: QuickPreviewProps) {
   const {
     evalScore, winProb, assessment, aiReasoning,
     playerBestMoves, aiCandidateMoves, playerThreats, aiThreats,
+    nnSuggestions, nnMeta,
   } = analysis;
+
+  const nnPicks: NnSuggestion[] = nnSuggestions ?? [];
 
   const mq = analysis.moveQuality || 'optimal';
   const sqs = analysis.criticalSquares || [];
@@ -117,6 +121,53 @@ export function QuickPreview({ visible }: QuickPreviewProps) {
                   <div className='flex items-center gap-1'><span className='text-slate-500 font-medium'>{100 - winProb}%</span><div className={cn('w-2 h-2 rounded-full', AI_DOT)} /></div>
                 </div>
               </div>
+
+              {/* NN Suggestions — neural-net-ranked moves for YOUR next turn */}
+              {nnPicks.length > 0 && (
+                <div className='space-y-1.5'>
+                  <div className='flex items-center gap-1.5'>
+                    <Brain className='w-3.5 h-3.5 text-violet-500' />
+                    <span className='text-[10px] font-bold uppercase tracking-wider text-muted-foreground'>NN Suggestions</span>
+                    <Sparkles className='w-3 h-3 text-violet-400 ml-auto' />
+                  </div>
+                  {nnPicks.map((s, i) => (
+                    <div key={i} className={cn(
+                      'rounded-lg px-2 py-1.5 space-y-1 border',
+                      i === 0 ? 'bg-violet-50/70 border-violet-200/60' : 'bg-white/25 dark:bg-white/5 border-transparent'
+                    )}>
+                      <div className='flex items-center gap-1.5'>
+                        <span className={cn(
+                          'w-4 h-4 rounded-full text-[8px] font-bold flex items-center justify-center shrink-0',
+                          i === 0 ? 'bg-violet-500 text-white' : 'bg-muted text-muted-foreground'
+                        )}>{i + 1}</span>
+                        <span className='font-mono font-bold text-[11px] text-foreground'>{coordLabel(s.row, s.col, boardSize)}</span>
+                        {s.tactical && (
+                          <span className='text-[8px] font-bold text-emerald-600 bg-emerald-50 px-1 py-0.5 rounded-full shrink-0'>ENGINE ✓</span>
+                        )}
+                        {s.isFork && <Zap className='w-3 h-3 text-amber-500 shrink-0' />}
+                        <span className='ml-auto font-mono text-[11px] font-bold text-violet-600'>{s.nnWinProb.toFixed(1)}%</span>
+                      </div>
+                      <div className='flex items-center gap-1.5'>
+                        <div className='flex-1 h-1.5 bg-slate-200/70 rounded-full overflow-hidden'>
+                          <motion.div
+                            className='h-full rounded-full'
+                            style={{ background: 'linear-gradient(90deg, #a78bfa, #7c3aed)' }}
+                            initial={{ width: 0 }}
+                            animate={{ width: `${s.nnWinProb}%` }}
+                            transition={{ duration: 0.4, delay: i * 0.05 }}
+                          />
+                        </div>
+                      </div>
+                      <p className='text-[9px] text-muted-foreground leading-snug truncate'>{s.tag}</p>
+                    </div>
+                  ))}
+                  {nnMeta && (
+                    <p className='text-[8px] text-muted-foreground/70 text-center'>
+                      {nnMeta.params.toLocaleString()} params · {(nnMeta.trainingSamples / 1000).toFixed(1)}k training samples
+                    </p>
+                  )}
+                </div>
+              )}
 
               {/* Strategic Narrative */}
               <div className='bg-white/25 dark:bg-white/5 rounded-xl p-2.5'>

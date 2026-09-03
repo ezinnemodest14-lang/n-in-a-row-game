@@ -96,6 +96,65 @@ export async function nnEvaluate(
   }
 }
 
+/**
+ * Batch evaluation — one HTTP round-trip for the whole game review replay.
+ * Returns winProb1 (player-1 perspective, 0..1) per board, or null on any
+ * failure (caller falls back to the heuristic evaluator).
+ */
+export async function nnEvaluateBatch(
+  boards: number[][][],
+  n: number,
+  timeoutMs = 4000
+): Promise<number[] | null> {
+  if (boards.length === 0) return [];
+  try {
+    const up = await ensureService(1500);
+    if (!up) return null;
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), timeoutMs);
+    const res = await fetch(`${NN_BASE}/predict-batch`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ boards, n }),
+      signal: ctrl.signal,
+      cache: "no-store",
+    });
+    clearTimeout(t);
+    if (!res.ok) return null;
+    const data = (await res.json()) as { winProbs1?: unknown; count?: unknown };
+    if (!Array.isArray(data.winProbs1) || data.winProbs1.length !== boards.length) return null;
+    const out = data.winProbs1.map((v) =>
+      typeof v === "number" && Number.isFinite(v) ? Math.max(0, Math.min(1, v)) : 0.5
+    );
+    return out;
+  } catch {
+    return null;
+  }
+}
+
+/** Model metadata for UI badges (params / training samples), or null. */
+export async function nnMeta(
+  timeoutMs = 900
+): Promise<{ params: number; trainingSamples: number } | null> {
+  try {
+    const up = await ensureService(1200);
+    if (!up) return null;
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), timeoutMs);
+    const res = await fetch(`${NN_BASE}/health`, { signal: ctrl.signal, cache: "no-store" });
+    clearTimeout(t);
+    if (!res.ok) return null;
+    const data = (await res.json()) as { params?: unknown; trainingSamples?: unknown };
+    if (typeof data.params !== "number") return null;
+    return {
+      params: data.params,
+      trainingSamples: typeof data.trainingSamples === "number" ? data.trainingSamples : 0,
+    };
+  } catch {
+    return null;
+  }
+}
+
 /** Fire-and-forget NN training round (never blocks the caller). */
 export async function nnTrainRound(games = 60, boardSize = 11, epochs = 2): Promise<void> {
   try {

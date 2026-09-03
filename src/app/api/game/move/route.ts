@@ -11,6 +11,7 @@ import { cloneBoard, findWinLine, legalMoves, runMCTS, checkWinAt, ensureSafeMov
 import { REASON_TEXT } from "@/lib/game/threat-classifier";
 import { scoreMoveDelta, computeFullScore, scoreBreakdown } from "@/lib/game/scoring";
 import { buildAnalysis, buildLearningSnapshot, buildTerminalAnalysis } from "@/lib/game/analyzer";
+import { buildNnSuggestions } from "@/lib/game/nn-suggestions";
 import { loadRave, saveRave } from "@/lib/game/engine-runtime";
 import { nnEvaluate, nnHealth } from "@/lib/neural-client";
 import type { Analysis, GameMode, GameStatePayload, ScoreState } from "@/lib/game/types";
@@ -337,7 +338,20 @@ export async function POST(req: Request) {
 
     // ------------------------------------------------------------------
     // 3) Analysis + learning telemetry (from the pre-AI-move position).
+    //    The NN SUGGESTIONS are computed on the POST-AI-move board — they
+    //    advise the player's NEXT move (it is their turn again now).
     // ------------------------------------------------------------------
+    const nnSug =
+      gameMode === "classic"
+        ? await buildNnSuggestions({
+            board: flat,
+            n: boardSize,
+            winLen: winLength,
+            playerPiece,
+            aiPiece,
+          })
+        : { suggestions: [], meta: null };
+
     const analysis = buildAnalysis({
       board: boardBefore,
       n: boardSize,
@@ -350,6 +364,8 @@ export async function POST(req: Request) {
       finalMove: aiCell,
       reasoningSuffix,
       nnReRank,
+      nnSuggestions: nnSug.suggestions,
+      nnMeta: nnSug.meta,
     });
     const lastLearning = buildLearningSnapshot({ rave, mcts: res });
     const lastStats = {

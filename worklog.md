@@ -229,3 +229,25 @@ Stage Summary:
 - Generalization proven: 0/308 fuzz violations — an avoidable unstoppable four is ALWAYS avoided, even from adversarial base picks; RAVE learns from every safety override.
 - Eval bar honest in the screenshot position (AI ≤30% with a live open three against it; 45% when a blockable four exists).
 - Files: threat-classifier.ts (v4 layer + tacticalMove v4 + counter-four), mcts.ts (fast playouts + final safety + RAVE learning), api/game/move/route.ts (post-blend safety), analyzer.ts (tiered clamps), scripts/{replay-blind-move,fuzz-safety,http-replay}.ts.
+
+---
+Task ID: 13
+Agent: Z.ai Code (main)
+Task: User — "improving the analysis panel and game review in the bottom, please use the neural net to aid suggestions in the side panel, let me see how good it is"
+
+Work Log:
+- NN service (mini-services/nn-service): added POST /predict-batch (≤800 boards/request, per-board normalization reused from parseBoard) for the game-review replay; verified live (2 boards → winProbs1, 0.7ms).
+- neural-client.ts: added nnEvaluateBatch (single-round-trip batch eval, null-degrading) and nnMeta (params + trainingSamples from /health).
+- New src/lib/game/nn-suggestions.ts (buildNnSuggestions): after the AI's move, candidates = threat-classifier tactical cells (score-desc, cap 7) topped up with center-first neighbor cells; each candidate is SIMULATED and NN-scored to the PLAYER's win prob (0..100); decorated with describeCategory tags + `tactical` flag when the NN #1 equals the classifier's top cell; returns nnMeta.
+- Move route: nnSuggestions computed on the POST-AI-move board (classic mode only) and passed through buildAnalysis → analysis.nnSuggestions + analysis.nnMeta (terminal exits omit them by design).
+- New POST /api/game/review: replays the sanitized moveHistory, NN-scores EVERY position via /predict-batch (trust ramp blends toward 50% under 8 stones — NN's empty-board prior is noisy), terminal truth clamp on the final point (100/0/50 via checkWinAt/board-full), per-move grades combining NN swing deltas with HARD tactical facts (took win → brilliant; missed own five / missed forced block → blunder; allowed an open four without a forcing reply → mistake; otherwise swing thresholds), chess-style accuracy (100·exp(-loss/20) averaged per side), grade tallies, eval curve + takeaways; heuristic logistic fallback with usedNn=false if the NN is down.
+- Store: review/reviewLoading state + runReview(); auto-fires when a move ends the game (makeMove & playAuto); cleared on newGame.
+- QuickPreview (side panel): new "NN Suggestions" section directly under Position — ranked picks with rank medal, coord, violet NN% bars, ENGINE ✓ agreement badge, fork icon, tactical tag, and a model meta footer ("13,569 params · 4.9k training samples").
+- AnalysisPanel (bottom): new first section "Game Review · NN" (NEURAL NET badge) — accuracy cards per side with grade-chip tallies, SVG win-probability area chart (NEURAL NET/HEURISTIC source badge), takeaway lines, scrollable chronological graded move list (max-h-64); "Your Best Options" upgraded to "Your Best Moves · NN Ranked" rendering NnSuggestionRow (rank, coord, tag, ENGINE ✓, NN% bar) whenever nnSuggestions exist, falling back to threat-based rows otherwise; overlay footer updated.
+
+Stage Summary:
+- The side panel now shows genuine NEURAL-NET move advice: 4 suggestions ranked by the network's own win-probability for you, each with the tactical label and an ENGINE ✓ flag when net and search agree — the model's quality is directly visible (57.2% vs 56.8% style margins).
+- Game Review is a full chess.com-style replay powered by the NN: per-move grades with hard tactical overrides, win-prob curve, per-side accuracy — auto-runs the moment a game ends and is re-runnable mid-game from the button.
+- Verified in browser (1440px + 390px): QuickView NN Suggestions render on eval hover (screenshot), Game Review runs and renders (accuracy 99.8/94.8 mid-game; 99.2/100.0 on a rigged win with the winning move graded Brilliant +50.8 and the final eval point 100), auto-review fires on game end, eval bar shows truthful 100.0/0.0, mobile pin works with no horizontal scroll; 0 page errors; lint clean.
+- API tests: scripts/test-nn-review.ts (live scripted game: every response carries 4 NN suggestions + meta; review 92-246ms usedNn=true) and scripts/test-review-rigged.ts (rigged win: final point 100, winning move brilliant, AI's missed block flagged blunder — ALL ASSERTIONS PASS).
+- Files: mini-services/nn-service/index.ts, src/lib/neural-client.ts, src/lib/game/nn-suggestions.ts (new), src/app/api/game/move/route.ts, src/app/api/game/review/route.ts (new), src/lib/game/types.ts, src/lib/game/analyzer.ts, src/store/game-store.ts, src/components/game/{QuickPreview,AnalysisPanel}.tsx, scripts/{test-nn-review,test-review-rigged}.ts (new).
