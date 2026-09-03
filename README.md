@@ -108,6 +108,55 @@ The neural service is **optional**. `src/lib/neural-client.ts` health-checks `lo
 
 ---
 
+## 🧠 Algorithm deep dive
+
+### Search: UCT-MCTS with a persistent global prior
+
+Selection at each tree node maximizes:
+
+```
+score = β · raveRate + (1 − β) · UCT
+UCT   = Q + √2 · √(ln N / (n + ε))
+β     = √(C / (3n + C)),   C = 220
+```
+
+- **Q** — the child's empirical win rate; **N** — parent visits; **n** — child visits.
+- `raveRate` comes from a **persistent, position-independent statistics table** keyed by `(player, cell)` per `(boardSize, gameMode)`. Every playout move updates the table, and the table survives restarts via SQLite (`RaveMemory`). It behaves as a learned, slowly-evolving move prior rather than textbook per-node AMAF/RAVE (see limitations).
+- **Root progressive bias** — at the root only, threat-classifier scores add
+  `0.9 · min(1, score/CAT_VALUE[OPEN_FOUR]) · √(ln(N+2)) / (n+8)`, so forced-looking cells get explored first and the bias decays as visits accumulate.
+- **Tree reuse** — between turns the previous tree is descended into (verified by replaying the move path and byte-comparing boards), keeping statistics that are still valid.
+- **Playout policy** — a fast tactical ladder (win → open four → block win → block four → fork → block fork → block open three), then a threat/score-weighted softmax (weights capped at 40 for diversity) multiplied by a RAVE-rate boost `0.6 + 0.8 · raveRate`. Playout moves feed the persistent table (except during Quick-Train, which uses zero decay by design).
+- Move choice = **most-visited root child**; deterministic `mulberry32` seeding makes searches reproducible given a seed.
+
+### Tactical safety net (threat classifier v3 + safety layer v4)
+
+A cell classifier grades every empty cell per direction: solid runs, **gap-aware** patterns (`X_XX`, `XX_XX`), forks (two strong directions of any type), and double open-threes, on a 9-level scale (`NONE → ONE → TWO → SIMPLE_THREE → BROKEN_THREE → OPEN_THREE → SIMPLE_FOUR → OPEN_FOUR → WIN`).
+
+Two layers use it:
+
+1. **Root override** — before shipping the search's move, an 8-priority ladder checks win → block-win → open-four → block-open-four → block-four → (safety-scored open-three defense) → fork → block-fork → block-open-three. Forced situations are resolved by **`chooseSafeDefense`**, which simulates every candidate block and scores the opponent's resulting forcing outlook (danger 100 = ≥2 five-completions … −60 = we get ≥2). This prevents the classic Gomoku blunder of blocking a lagged four while the open three stays alive.
+2. **Final guarantee** — after the NN blend, `ensureSafeMove` vetoes any move that would leave the opponent an unstoppable four; overrides are reported in the move reasoning.
+
+### Neural evaluator (optional layer)
+
+A dependency-free MLP (`mini-services/nn-service/`) over a **40-dimensional handcrafted feature vector**: per-direction max run / open ends / threat count for both players, stone density, center influence, stone share, line potential, mobility (4- and 8-neighborhood), and turn parity — all in [0,1], player-symmetric so the output reads as player-1 win probability. It contributes in two places:
+
+- **Blend re-ranking** — when the search itself picked the move, the top root children are re-scored as `0.6 · MCTS winRate + 0.4 · NN winProb` and the best blended score wins. Tactical overrides always stand.
+- **Player suggestions** — after the AI moves, the top tactical + positional candidates are simulated and NN-scored *for you*, tagged with the classifier's threat description, with an "engine and net agree" flag.
+
+### Known algorithmic limitations & improvement roadmap
+
+| # | Limitation | Planned improvement | Impact | Effort |
+|---|---|---|---|---|
+| 1 | Playout tactical checks scan **all** empty cells for both players — the dominant cost on large boards | Restrict playout/selection candidates to cells within distance 2 of existing stones (standard in strong Gomoku engines) | 5–20× more simulations/sec | Small |
+| 2 | Safety net is 1-ply; deep forced sequences (chain of fours → double threat) can slip through | Recursive **VCF/VCT threat-space search** (Allis 1994) over forcing moves only | Biggest playing-strength gain | Medium |
+| 3 | The persistent prior is position-independent — not textbook per-node AMAF/RAVE; β shrinks with child visits only | Per-node AMAF statistics, keeping the global table as cold-start prior | Better move quality per simulation | Medium |
+| 4 | Tree nodes are keyed by move-from-parent — transpositions duplicate subtrees | Zobrist hashing + transposition table | Smaller tree, stronger reuse | Medium |
+| 5 | Selection blends a [0,1] prior with an unbounded UCT term, damping exploration early | Blend values only (`(1−β)Q + β·raveQ`), add exploration separately | Cleaner search statistics | Trivial |
+| 6 | NN blend re-ranks after search; low-visit children's win rates are noise blended at full weight | PUCT-style NN prior inside selection (AlphaZero-like) + visit-weighted blending + batch inference | Stronger, faster NN integration | Medium |
+
+---
+
 ## 📦 Building the portable bundle (Windows)
 
 ```cmd
