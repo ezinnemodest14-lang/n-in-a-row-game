@@ -234,16 +234,24 @@ export function buildAnalysis(opts: {
   playerTotal: number;
   aiTotal: number;
   nnWinProb?: number | null; // 0..1, player-1 perspective, already blended
+  /** Cell actually played after the 60/40 NN re-rank (may differ from
+   *  mcts.move). Reasoning always names the move that was really played. */
+  finalMove?: number;
+  /** Extra sentence appended to aiReasoning (NN re-rank outcome). */
+  reasoningSuffix?: string;
+  /** NN blend outcome, echoed verbatim into the analysis payload. */
+  nnReRank?: Analysis["nnReRank"];
 }): Analysis {
-  const { board, n, winLen, mode, mcts, playerTotal, aiTotal, nnWinProb } = opts;
+  const { board, n, winLen, mode, mcts, playerTotal, aiTotal, nnWinProb, finalMove, reasoningSuffix, nnReRank } = opts;
 
   const ev = evaluatePosition(board, n, winLen);
 
   // Blend: 60% search win-rate + 40% NN prior when available (player-1 persp).
-  let aiWinPct = Math.round(mcts.rootWinRate * 100);
+  // Precision: one decimal (user request — "increase the accuracy of the eval bar").
+  let aiWinPct = Math.round(mcts.rootWinRate * 1000) / 10;
   if (typeof nnWinProb === "number" && Number.isFinite(nnWinProb)) {
     const blended1 = 0.6 * mcts.rootWinRate + 0.4 * nnWinProb;
-    aiWinPct = Math.round((1 - blended1) * 100); // AI perspective = 1 - player1
+    aiWinPct = Math.round((1 - blended1) * 1000) / 10; // AI perspective = 1 - player1
   }
   aiWinPct = Math.max(0, Math.min(100, aiWinPct));
   const playerWinPct = 100 - aiWinPct; // derived — bug #17
@@ -264,7 +272,8 @@ export function buildAnalysis(opts: {
     typeof nnWinProb === "number" && Number.isFinite(nnWinProb)
       ? ` (NN eval: ${(nnWinProb * 100).toFixed(1)}%)`
       : "";
-  const aiReasoning = `Played ${CAT_NAME[0] ? "" : ""}${coordOf(mcts.move, n)} — ${baseReason}${nnPart}`;
+  const playedCell = typeof finalMove === "number" ? finalMove : mcts.move;
+  const aiReasoning = `Played ${coordOf(playedCell, n)} — ${baseReason}${nnPart}${reasoningSuffix ?? ""}`;
 
   const scoringAnalysis =
     mode === "scoring" ? buildScoringAnalysis(board, n, playerTotal, aiTotal) : null;
@@ -295,6 +304,7 @@ export function buildAnalysis(opts: {
     boardControl: buildBoardControl(board, n),
     scoringAnalysis,
     aiReasoning,
+    nnReRank,
   };
 }
 

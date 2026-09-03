@@ -698,10 +698,12 @@ export function BottomPanel() {
   const isAiTurn = status === 'playing' && isThinking;
 
   return (
-    <section className='absolute left-0 right-0 bottom-0 z-10 bg-[#fbf7ef]/55 dark:bg-stone-900/50 backdrop-blur-xl border-t border-[#d8c9a8]/50 dark:border-stone-700/50 shadow-[0_-4px_30px_rgba(90,70,30,0.10)] rounded-t-2xl'>
+    // Docked BELOW the board in normal flow (never overlays the playing
+    // area). Acrylic warm-parchment surface matching the board theme.
+    <section className='relative w-full flex-shrink-0 bg-[#fbf7ef]/70 dark:bg-stone-900/55 backdrop-blur-xl border border-[#d8c9a8]/50 dark:border-stone-700/50 shadow-[0_4px_24px_rgba(90,70,30,0.08)] rounded-2xl'>
       <div className='max-w-3xl mx-auto w-full'>
         {/* Status bar — always visible */}
-        <div className='px-3 py-1.5 flex items-center justify-between gap-3'>
+        <div className='px-3 py-1 flex items-center justify-between gap-3'>
           <div className='flex items-center gap-3'>
             <div className='flex items-center gap-2'>
               <div className={cn('w-3 h-3 rounded-full bg-gradient-to-br from-emerald-400 to-emerald-600 shadow-sm transition-opacity', isPlayerTurn ? 'opacity-100 ring-2 ring-emerald-400/50' : 'opacity-50')} />
@@ -763,7 +765,7 @@ export function BottomPanel() {
               transition={{ duration: 0.25 }}
               className='overflow-hidden'
             >
-              <div className='px-2 pb-2 max-h-[44vh] overflow-y-auto scrollbar-thin'>
+              <div className='px-2 pb-2 max-h-[36vh] overflow-y-auto scrollbar-thin'>
                 <AnalysisPanel />
               </div>
             </motion.div>
@@ -771,8 +773,8 @@ export function BottomPanel() {
         </AnimatePresence>
 
         {/* Footer text — always visible */}
-        <div className='border-t border-white/30 px-3 py-1'>
-          <p className='text-[9px] text-muted-foreground/70 text-center'>MCTS + RAVE (Gelly & Silver) · Threat Classifier · Global learning</p>
+        <div className='border-t border-white/30 px-3 py-0.5'>
+          <p className='text-[9px] text-muted-foreground/70 text-center py-0.5'>MCTS + RAVE (Gelly & Silver) · Neural-net blend (60/40) · Threat Classifier · Global learning</p>
         </div>
       </div>
     </section>

@@ -12,7 +12,7 @@ import { scoreMoveDelta, computeFullScore, scoreBreakdown } from "@/lib/game/sco
 import { buildAnalysis, buildLearningSnapshot } from "@/lib/game/analyzer";
 import { loadRave, saveRave } from "@/lib/game/engine-runtime";
 import { nnEvaluate, nnHealth } from "@/lib/neural-client";
-import type { GameMode, GameStatePayload, ScoreState } from "@/lib/game/types";
+import type { Analysis, GameMode, GameStatePayload, ScoreState } from "@/lib/game/types";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -29,10 +29,27 @@ interface MoveBody {
   col?: number;
   auto?: boolean;
   simulations?: number;
+  /** Prior history so the move counter / timeline spans the whole game,
+   *  not just the current request. Sanitized below — board is authoritative. */
+  moveHistory?: GameStatePayload["moveHistory"];
+  /** Prior Score-Attack totals (same rationale as moveHistory). */
+  playerScore?: ScoreState;
+  aiScore?: ScoreState;
 }
 
 function emptyScore(): ScoreState {
   return { total: 0, breakdown: { fives: 0, fours: 0, triples: 0 } };
+}
+
+/** Validate a client-supplied ScoreState; fall back to empty. */
+function sanitizeScore(v: unknown): ScoreState {
+  if (!v || typeof v !== "object") return emptyScore();
+  const o = v as { total?: unknown; breakdown?: { fives?: unknown; fours?: unknown; triples?: unknown } };
+  const num = (x: unknown) => (typeof x === "number" && Number.isFinite(x) && x >= 0 ? Math.floor(x) : 0);
+  return {
+    total: num(o.total),
+    breakdown: { fives: num(o.breakdown?.fives), fours: num(o.breakdown?.fours), triples: num(o.breakdown?.triples) },
+  };
 }
 
 function applyScoreDelta(prev: ScoreState, delta: number): ScoreState {
@@ -111,16 +128,31 @@ export async function POST(req: Request) {
       return NextResponse.json({ ok: false, error: "Cell occupied" }, { status: 400 });
     }
 
+    // Seed history from the client (sanitized — the board itself stays the
+    // source of truth for win/score logic).
     const moveHistory: GameStatePayload["moveHistory"] = [];
-    const playerScore = emptyScore();
-    const aiScore = emptyScore();
+    if (Array.isArray(body.moveHistory)) {
+      for (const m of body.moveHistory.slice(-boardSize * boardSize)) {
+        if (!m || typeof m !== "object") continue;
+        const r = (m as { row?: unknown }).row;
+        const c = (m as { col?: unknown }).col;
+        const p = (m as { player?: unknown }).player;
+        const ps = (m as { pointsScored?: unknown }).pointsScored;
+        if (typeof r !== "number" || typeof c !== "number" || typeof p !== "number") continue;
+        if (!Number.isInteger(r) || !Number.isInteger(c) || r < 0 || c < 0 || r >= boardSize || c >= boardSize) continue;
+        if (p !== 1 && p !== 2) continue;
+        moveHistory.push({ row: r, col: c, player: p, pointsScored: typeof ps === "number" ? ps : null });
+      }
+    }
+    let playerScore = sanitizeScore(body.playerScore);
+    let aiScore = sanitizeScore(body.aiScore);
 
     flat[moveCell] = mover;
     let moverDelta = 0;
     if (gameMode === "scoring") {
       moverDelta = scoreMoveDelta(flat, boardSize, Math.floor(moveCell / boardSize), moveCell % boardSize, mover);
-      if (mover === 1) playerScore.total += moverDelta;
-      else aiScore.total += moverDelta;
+      if (mover === 1) playerScore = applyScoreDelta(playerScore, moverDelta);
+      else aiScore = applyScoreDelta(aiScore, moverDelta);
     }
     moveHistory.push({ row: Math.floor(moveCell / boardSize), col: moveCell % boardSize, player: mover, pointsScored: gameMode === "scoring" ? moverDelta : null });
 
@@ -185,7 +217,47 @@ export async function POST(req: Request) {
       movePath: !isAuto && mover === playerPiece ? [moveCell] : [],
     });
 
-    const aiCell = res.move;
+    // ------------------------------------------------------------------
+    // 2b) Neural-net blend — the NN genuinely influences move selection.
+    // Top MCTS root candidates are re-scored as 0.6·search + 0.4·NN and the
+    // best blended score wins. Tactical overrides (forced wins / blocks)
+    // always stand: re-ranking only runs when the search itself chose the
+    // move (reason === "search"). Graceful fallback: any NN failure keeps
+    // the pure MCTS pick.
+    // ------------------------------------------------------------------
+    let aiCell = res.move;
+    let nnReRank: Analysis["nnReRank"];
+    let reasoningSuffix = "";
+    if (nn && res.reason === "search" && res.topChildren.length >= 2) {
+      const coord = (cell: number) => {
+        const r = Math.floor(cell / boardSize);
+        const c = cell % boardSize;
+        const letter = String.fromCharCode(65 + (c >= 8 ? c + 1 : c));
+        return `${letter}${r + 1}`;
+      };
+      const blend: { cell: number; score: number; nnAi: number }[] = [];
+      for (const cand of res.topChildren) {
+        if (boardBefore[cand.cell] !== 0) continue;
+        const after = cloneBoard(boardBefore);
+        after[cand.cell] = aiPiece;
+        const pred = await nnEvaluate(int8ToBoard(after, boardSize), boardSize, 900);
+        if (!pred) continue;
+        const nnAi = aiPiece === 1 ? pred.winProb1 : 1 - pred.winProb1; // AI perspective
+        blend.push({ cell: cand.cell, score: 0.6 * cand.winRate + 0.4 * nnAi, nnAi });
+      }
+      if (blend.length >= 2) {
+        blend.sort((a, b) => b.score - a.score);
+        const best = blend[0];
+        if (best.cell !== aiCell) {
+          nnReRank = { agreed: false, from: coord(res.move), to: coord(best.cell), candidates: blend.length };
+          reasoningSuffix = ` — NN blend (60/40) re-ranked the top ${blend.length}: ${nnReRank.to} over ${nnReRank.from}`;
+          aiCell = best.cell;
+        } else {
+          nnReRank = { agreed: true, to: coord(best.cell), candidates: blend.length };
+        }
+      }
+    }
+
     if (flat[aiCell] !== 0) {
       const lm = legalMoves(flat);
       if (!lm.length) {
@@ -198,7 +270,7 @@ export async function POST(req: Request) {
     let aiDelta = 0;
     if (gameMode === "scoring") {
       aiDelta = scoreMoveDelta(flat, boardSize, Math.floor(aiCell / boardSize), aiCell % boardSize, aiPiece);
-      aiScore.total += aiDelta;
+      aiScore = applyScoreDelta(aiScore, aiDelta);
     }
     moveHistory.push({ row: Math.floor(aiCell / boardSize), col: aiCell % boardSize, player: aiPiece, pointsScored: gameMode === "scoring" ? aiDelta : null });
 
@@ -233,6 +305,9 @@ export async function POST(req: Request) {
       playerTotal: playerScoreBefore,
       aiTotal: aiScoreBefore,
       nnWinProb: nn?.winProb1 ?? null,
+      finalMove: aiCell,
+      reasoningSuffix,
+      nnReRank,
     });
     const lastLearning = buildLearningSnapshot({ rave, mcts: res });
     const lastStats = {

@@ -2,11 +2,13 @@
 
 // ============================================================================
 // N-in-a-Row — page composition.
-// Layout law (rebuild-spec Part F): the board ALWAYS keeps ≥85% of the
-// viewport. QuickPreview + BottomPanel are absolute translucent acrylic
-// overlays INSIDE the board container — no UI element may push or shrink
-// the board.
-// Auto-peek state machine: after any move both panels show for
+// Layout law (v2, per user request "the analysis still blocks the board"):
+// NOTHING may overlay the board. QuickPreview remains a translucent acrylic
+// overlay floating over the board's right edge (hover/peek only), while the
+// BottomPanel is DOCKED BELOW the board in normal flow — when the analysis
+// expands, the board's ResizeObserver shrinks it smoothly. The board is
+// never covered.
+// Auto-peek state machine: after any move the QuickPreview shows for
 // previewDuration seconds (0 = stay), then auto-dismiss. Three expansion
 // triggers: hovered || pinned || autoPeek. Hover persistence: hovering a
 // panel keeps it open; leaving resets all three; tapping toggles pinned.
@@ -107,12 +109,12 @@ export default function Home() {
     <div className="min-h-screen flex flex-col bg-[radial-gradient(ellipse_at_top,#faf6ee_0%,#f3ecdd_55%,#ece2cc_100%)] dark:bg-[radial-gradient(ellipse_at_top,#1c1917_0%,#292524_60%,#1c1917_100%)]">
       <Toolbar onOpenSettings={() => setSettingsOpen(true)} onOpenStats={() => setStatsOpen(true)} />
 
-      <main className="flex-1 relative min-h-0 overflow-hidden px-2 py-2 flex">
-        {/* Board container — the ONLY layout anchor; overlays live inside it.
-            main is display:flex so this child gets a DEFINITE stretched
-            height — the Board's ResizeObserver always measures real pixels. */}
-        <div className="relative w-full flex-1 min-w-0">
-          <div className="absolute inset-0 flex items-stretch justify-center gap-1.5 sm:gap-2.5 pb-14 pt-1">
+      <main className="flex-1 relative min-h-0 overflow-hidden px-2 py-2 flex flex-col gap-1.5">
+        {/* Board container — the ONLY layout anchor. main is display:flex
+            (column) so this child gets a DEFINITE stretched height — the
+            Board's ResizeObserver always measures real pixels. */}
+        <div className="relative w-full flex-1 min-h-0">
+          <div className="absolute inset-0 flex items-stretch justify-center gap-1.5 sm:gap-2.5 pb-0.5 pt-1">
             {/* Board zone: fills remaining width, definite height */}
             <div className="relative flex-1 min-w-0 h-full">
               <Board />
@@ -130,12 +132,12 @@ export default function Home() {
               <EvalBar isSidePanelVisible={previewVisible} />
             </div>
           </div>
-
-          {/* Bottom analysis overlay — floats over the board, never pushes it */}
-          <div className="absolute left-0 right-0 bottom-0 z-10 pointer-events-none [&>*]:pointer-events-auto">
-            <BottomPanel />
-          </div>
         </div>
+
+        {/* Analysis dock — in normal flow BELOW the board. The board's
+            ResizeObserver shrinks it smoothly when the analysis expands;
+            nothing ever covers the playing area. */}
+        <BottomPanel />
       </main>
 
       {/* Sheets */}

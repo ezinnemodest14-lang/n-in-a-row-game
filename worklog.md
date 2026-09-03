@@ -147,3 +147,23 @@ Work Log:
 Stage Summary:
 - Servers running & STABLE across tool calls via blessed `.zscripts/dev.sh` mechanism. Restart command if ever needed again: cd /home/z/my-project && (setsid nohup bash .zscripts/dev.sh > .zscripts/dev.log 2>&1 < /dev/null &) — wait ~12s, then curl localhost:3000 and localhost:3020/health.
 - Full stack re-verified working end-to-end after restart. NN weights restored (4,885 samples). No code changes needed this task.
+
+---
+Task ID: 9
+Agent: Z.ai Code (main)
+Task: User feedback round — analysis blocking board, eval bar size/accuracy, "did you add the NN to AI play?"
+
+Work Log:
+- Diagnosed: BottomPanel was an absolute overlay (collapsed bar ~72px vs 56px reserved → covered board edge; expanded panel covered up to 44vh).
+- Layout v2 (page.tsx): main → flex-col; BottomPanel DOCKED below the board in normal flow (removed absolute/z-10/pointer-events wrapper, dropped pb-14). Board's ResizeObserver shrinks the board smoothly when analysis expands — geometrically verified ZERO overlap (board y 72–393 vs panel y 433–792, 40px gap). QuickPreview still a hover/peek overlay (by design).
+- EvalBar v2: column w-9→w-12/w-14; track fills column height (min 160, cap 380px, was fixed 140px); stones w-4/w-5; labels 9-10px; values 12-14px; percentages to ONE DECIMAL via fmt1() (float-artifact-safe); eval badge 11-12px with decimal when fractional. Score-attack bar shares the upgrade.
+- NN blend made REAL (was display-only): move route now re-scores MCTS topChildren (≤6) with per-candidate NN predictions (0.6·search + 0.4·NN, AI perspective); best blended wins unless reason !== 'search' (tactical overrides always stand); graceful NN-failure fallback to pure MCTS. Outcome surfaced: analysis.nnReRank {agreed, from, to, candidates} + reasoning suffix. Live-verified: "NN blend (60/40) re-ranked the top 6: J9 over N7" and the AI actually played J9 (stone on board).
+- analyzer: winProb/aiWinProb now 1-decimal (round ×1000/10); buildAnalysis gained finalMove/reasoningSuffix/nnReRank; reasoning always names the move actually played; removed CAT_NAME[0] artifact.
+- BUGS found & fixed during verification: (1) moveHistory reset to [] every /api/game/move request → counter stuck at #2 with 4 stones; route now seeds sanitized body.moveHistory (row/col/player validated, capped); store sends prior history in makeMove + playAuto. Verified #4 after 2 turns. (2) Same class: playerScore/aiScore reset every request → Score Attack totals lost; now seeded via sanitizeScore + applyScoreDelta (breakdown triples/fours/fives now increment correctly; verified total 10→11, triples 0→1).
+- Footer text updated to include "Neural-net blend (60/40)".
+- Verification: lint clean; rigged-win via API still works (status won, winLine 5); mobile 390px: board ~82% width, no h-scroll, docked panel below; desktop 1280px: expanded analysis + full 14 sections, zero console errors.
+
+Stage Summary:
+- NOTHING overlays the board anymore; analysis docked below (board auto-shrinks).
+- EvalBar larger + 0.1% precision; NN genuinely influences AI move selection (60/40 re-rank, visible in reasoning + analysis.nnReRank).
+- moveHistory + Score-Attack totals now persist across the whole game (server-side sanitize, board remains authoritative).

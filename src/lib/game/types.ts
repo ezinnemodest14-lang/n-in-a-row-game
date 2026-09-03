@@ -112,6 +112,14 @@ export interface Analysis {
   boardControl: BoardControl;
   scoringAnalysis: ScoringAnalysis | null;
   aiReasoning: string;
+  /** Present when the NN blend (60% MCTS / 40% NN) confirmed or re-ranked
+   *  the MCTS top pick. `agreed` = NN kept the search's #1 choice. */
+  nnReRank?: {
+    agreed: boolean;
+    from?: string; // MCTS pick coord (only when re-ranked)
+    to?: string; // final pick coord
+    candidates: number; // how many candidates the NN scored
+  };
 }
 
 /** Search telemetry (rendered as sims/sec etc.). */

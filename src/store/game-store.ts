@@ -179,7 +179,8 @@ export const useGameStore = create<GameStore>((set, get) => ({
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          // Server applies the move itself — send the PRE-move board.
+          // Server applies the move itself — send the PRE-move board, plus
+          // prior history/scores so counters span the whole game.
           board: s.board,
           boardSize: s.boardSize,
           winLength: s.winLength,
@@ -189,6 +190,9 @@ export const useGameStore = create<GameStore>((set, get) => ({
           row,
           col,
           simulations: s.simulations,
+          moveHistory: s.moveHistory,
+          playerScore: s.playerScore,
+          aiScore: s.aiScore,
         }),
       });
       const data: MoveResponse = await res.json();
@@ -243,6 +247,9 @@ export const useGameStore = create<GameStore>((set, get) => ({
           aiPiece: s.aiPiece,
           auto: true,
           simulations: s.simulations,
+          moveHistory: s.moveHistory,
+          playerScore: s.playerScore,
+          aiScore: s.aiScore,
         }),
       });
       const data: MoveResponse = await res.json();
