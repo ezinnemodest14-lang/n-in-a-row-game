@@ -17,11 +17,13 @@
  * fallback to the deterministic seeded init if the file is missing/corrupt).
  */
 
+import path from "node:path";
 import { extractFeatures, FEATURE_DIM, DIRS } from './features';
 import { NeuralNet, paramCount, mulberry32 } from './neural-net';
 
 const PORT = 3020; // hardcoded by design — do NOT read process.env.PORT
-const WEIGHTS_PATH = '/home/z/my-project/mini-services/nn-service/nn-model-weights.json';
+// Weights live next to this file — portable across machines (was a hardcoded /home/z path).
+const WEIGHTS_PATH = path.join(import.meta.dir, 'nn-model-weights.json');
 
 // ───────────────────────────── Service state ────────────────────────────────
 
