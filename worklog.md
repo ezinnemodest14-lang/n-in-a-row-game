@@ -167,3 +167,22 @@ Stage Summary:
 - NOTHING overlays the board anymore; analysis docked below (board auto-shrinks).
 - EvalBar larger + 0.1% precision; NN genuinely influences AI move selection (60/40 re-rank, visible in reasoning + analysis.nnReRank).
 - moveHistory + Score-Attack totals now persist across the whole game (server-side sanitize, board remains authoritative).
+
+---
+Task ID: 10
+Agent: Z.ai Code (main)
+Task: User feedback round 2 — "board no longer 85% viewport during gameplay + lower analysis doesn't show on hover" (regressions from Task 9's docked layout)
+
+Work Log:
+- Root cause: Task 9 docked the BottomPanel below the board in normal flow (~76px collapsed + paddings). Board.tsx caps the board at min(container, 85vw, 85vh); the docked panel pushed the container height below the 85vh cap on typical viewports → board shrank from 85% to ~80-81% of viewport. The click-only "Analysis" toggle also removed the v1 hover-to-view behavior.
+- Layout v3 (page.tsx + AnalysisPanel.tsx BottomPanel): bottom chrome reduced to a slim in-flow status strip (~32px, h-8, one row: You/AI dots + turn status + score + move # + Analysis toggle) → board regains its 85vh cap (verified 676px = 84.5% of an 800px viewport, cap-limited; identical to original v1 sizing).
+- Analysis overlay restored as hover UI: full 14-section AnalysisPanel + footer in a translucent warm-acrylic card (bg-[#fbf7ef]/60 backdrop-blur-xl, max-w-3xl, max-h min(55vh,30rem), scrollbar-thin) positioned absolute bottom-full above the strip, rising over the board's lower edge. Visibility = opacity/transform tween only (no-jiggle law), pointer-events-none when hidden, aria-hidden sync. Placeholder "Make a move to unlock the full game analysis." when analysis is null.
+- Hover state machine v3 in page.tsx: hoveredEval (eval-bar hover → full mode: QuickPreview + bottom overlay), hoveredBottom (strip/overlay hover → bottom overlay only), pinEval (eval click → pins BOTH), pinBottom (strip click → pins bottom overlay ONLY, so touch users studying the analysis don't lose the board to the QuickPreview), autoPeek (post-move QuickPreview peek, previewDuration-driven, unchanged from v1). scheduleClose = 180ms grace-delay that clears ONLY transient states (hovered*, autoPeek) — pins persist until clicked again (bug found in verification: clearing pinned on leave made pin useless).
+- Post-move behavior: bottom overlay deliberately does NOT auto-open (board stays clear during play); only the right-edge QuickPreview peeks.
+- Mobile 390px: strip fits one row (34px, xs breakpoint hides "vs"), no h-scroll, board 308px (~79-81% width — width-limited by the eval column exactly as in v1; 85% cap is height-driven on desktop), tap-to-pin opens bottom overlay only.
+- Verified via Agent Browser: board 85% during play; strip hover → overlay opens (opacity 1, pe auto) with placeholder then full analysis; leave → closes (grace delay); strip click pin → stays open after leaving, click again → closes; eval hover → QuickPreview + bottom overlay together (v1 full mode); section headers expand/collapse inside overlay; board clicks register while overlays closed (#0→#2→#4 moves, AI replies, RAVE persisted); zero console errors; transient "togglePin is not defined" HMR errors were mid-edit only, final compile clean; lint clean.
+
+Stage Summary:
+- Board restored to its 85%-viewport cap during gameplay (slim 32px strip is the only bottom chrome).
+- Lower analysis views on HOVER again (strip hover, eval-bar hover, or click-to-pin; strip pin = overlay only, eval pin = full mode); overlay is translucent acrylic rising above the strip and never auto-opens after moves.
+- Files touched: src/app/page.tsx (state machine v3), src/components/game/AnalysisPanel.tsx (BottomPanel v3: strip + hover overlay, ChevronRight import removed).

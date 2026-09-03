@@ -8,7 +8,7 @@ import {
   ChevronUp, ChevronDown, TrendingUp, Eye, Lightbulb, AlertTriangle,
   Award, Clock, Activity, Layers, Sparkles, Info, Crosshair,
   Map, Sword, Gauge, CheckCircle2, History, MessageSquare,
-  Trophy, Minus, Loader2, ChevronRight
+  Trophy, Minus, Loader2
 } from 'lucide-react';
 import { coordLabel } from '@/lib/game/threat-classifier';
 import type { PlayerBestMove, ScoringAnalysis, CriticalSquare } from '@/lib/game/threat-classifier';
@@ -685,98 +685,130 @@ function CriticalRow({ sq, boardSize }: { sq: CriticalSquare; boardSize: number 
 }
 
 // ==================================================
-// BOTTOM PANEL — merges status bar + AnalysisPanel + footer
+// BOTTOM PANEL v3 — slim status strip (in flow, ~32px)
+// + hover-expanded analysis overlay that rises ABOVE
+// the strip and floats over the board's lower edge.
+//
+// Layout law: the Board self-caps at 85vw/85vh, so this
+// strip must stay minimal for the board to keep ≥85%
+// viewport during play. The overlay is hover-transient
+// (visible = eval-hover || strip-hover || pinned) and
+// translucent warm acrylic — the board is never
+// permanently covered and nothing auto-opens after moves.
 // ==================================================
 
-export function BottomPanel() {
+export function BottomPanel({ visible, onHoverEnter, onHoverLeave, onTogglePin }: {
+  visible: boolean;
+  onHoverEnter: () => void;
+  onHoverLeave: () => void;
+  onTogglePin: () => void;
+}) {
   const { status, isThinking, gameMode, playerPiece, currentPlayer,
           playerScore, aiScore, moveHistory, analysis } = useGameStore();
-  const [expanded, setExpanded] = useState(false);
 
   const isGameOver = status === 'won' || status === 'lost' || status === 'draw';
   const isPlayerTurn = !isThinking && status === 'playing' && currentPlayer === playerPiece;
   const isAiTurn = status === 'playing' && isThinking;
 
   return (
-    // Docked BELOW the board in normal flow (never overlays the playing
-    // area). Acrylic warm-parchment surface matching the board theme.
-    <section className='relative w-full flex-shrink-0 bg-[#fbf7ef]/70 dark:bg-stone-900/55 backdrop-blur-xl border border-[#d8c9a8]/50 dark:border-stone-700/50 shadow-[0_4px_24px_rgba(90,70,30,0.08)] rounded-2xl'>
-      <div className='max-w-3xl mx-auto w-full'>
-        {/* Status bar — always visible */}
-        <div className='px-3 py-1 flex items-center justify-between gap-3'>
-          <div className='flex items-center gap-3'>
-            <div className='flex items-center gap-2'>
-              <div className={cn('w-3 h-3 rounded-full bg-gradient-to-br from-emerald-400 to-emerald-600 shadow-sm transition-opacity', isPlayerTurn ? 'opacity-100 ring-2 ring-emerald-400/50' : 'opacity-50')} />
-              <span className='text-xs font-medium text-muted-foreground'>You</span>
+    <div
+      className='relative w-full flex-shrink-0'
+      onMouseEnter={onHoverEnter}
+      onMouseLeave={onHoverLeave}
+    >
+      {/* ---- Analysis overlay — rises above the strip, floats over the board ---- */}
+      <div
+        aria-hidden={!visible}
+        className={cn(
+          'absolute bottom-full left-1.5 right-1.5 mb-1.5 z-30',
+          'transition-[opacity,transform] duration-200 ease-out',
+          visible
+            ? 'opacity-100 translate-y-0 pointer-events-auto'
+            : 'opacity-0 translate-y-2 pointer-events-none'
+        )}
+      >
+        <div className='max-w-3xl mx-auto max-h-[min(55vh,30rem)] overflow-y-auto scrollbar-thin bg-[#fbf7ef]/60 dark:bg-stone-900/60 backdrop-blur-xl border border-[#d8c9a8]/50 dark:border-stone-700/50 rounded-2xl shadow-[0_-8px_32px_rgba(90,70,30,0.14)]'>
+          {analysis ? (
+            <>
+              <div className='px-2 pt-2'>
+                <AnalysisPanel />
+              </div>
+              <div className='border-t border-white/30 px-3 py-1'>
+                <p className='text-[9px] text-muted-foreground/70 text-center'>
+                  MCTS + RAVE (Gelly &amp; Silver) · Neural-net blend (60/40) · Threat Classifier · Global learning
+                </p>
+              </div>
+            </>
+          ) : (
+            <p className='px-4 py-3 text-[11px] text-muted-foreground text-center'>
+              Make a move to unlock the full game analysis.
+            </p>
+          )}
+        </div>
+      </div>
+
+      {/* ---- Slim status strip (in flow below the board) ---- */}
+      <section
+        onClick={onTogglePin}
+        title={visible ? 'Click to unpin analysis' : 'Hover to preview · click to pin'}
+        className='bg-[#fbf7ef]/70 dark:bg-stone-900/55 backdrop-blur-xl border border-[#d8c9a8]/50 dark:border-stone-700/50 shadow-[0_2px_12px_rgba(90,70,30,0.06)] rounded-xl cursor-pointer select-none'
+      >
+        <div className='max-w-3xl mx-auto px-3 h-8 flex items-center justify-between gap-3'>
+          {/* Left — players */}
+          <div className='flex items-center gap-2'>
+            <div className='flex items-center gap-1.5'>
+              <div className={cn('w-2.5 h-2.5 rounded-full bg-gradient-to-br from-emerald-400 to-emerald-600 shadow-sm transition-opacity', isPlayerTurn ? 'opacity-100 ring-2 ring-emerald-400/50' : 'opacity-50')} />
+              <span className='text-[11px] font-medium text-muted-foreground'>You</span>
             </div>
-            <span className='text-[10px] text-muted-foreground'>vs</span>
-            <div className='flex items-center gap-2'>
-              <div className={cn('w-3 h-3 rounded-full bg-gradient-to-br from-gray-600 to-gray-800 shadow-sm transition-opacity', isAiTurn ? 'opacity-100 ring-2 ring-amber-400/50' : 'opacity-50')} />
-              <span className='text-xs font-medium text-muted-foreground'>AI</span>
+            <span className='hidden xs:inline text-[9px] text-muted-foreground/60'>vs</span>
+            <div className='flex items-center gap-1.5'>
+              <div className={cn('w-2.5 h-2.5 rounded-full bg-gradient-to-br from-gray-600 to-gray-800 shadow-sm transition-opacity', isAiTurn ? 'opacity-100 ring-2 ring-amber-400/50' : 'opacity-50')} />
+              <span className='text-[11px] font-medium text-muted-foreground'>AI</span>
             </div>
           </div>
 
-          <div className='flex items-center gap-1.5'>
+          {/* Center — status */}
+          <div className='flex items-center min-w-0'>
             {isGameOver ? (
-              <span className={cn('inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-semibold', status === 'won' ? 'bg-emerald-100 text-emerald-700' : status === 'lost' ? 'bg-red-100 text-red-700' : 'bg-muted text-muted-foreground')}>
+              <span className={cn('inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[11px] font-semibold', status === 'won' ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300' : status === 'lost' ? 'bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300' : 'bg-muted text-muted-foreground')}>
                 {status === 'won' && <Trophy className='w-3 h-3' />}
                 {status === 'lost' && <Trophy className='w-3 h-3' />}
                 {status === 'draw' && <Minus className='w-3 h-3' />}
                 {status === 'won' ? 'You win!' : status === 'lost' ? 'AI wins' : 'Draw'}
               </span>
             ) : isAiTurn ? (
-              <span className='inline-flex items-center gap-1.5 text-xs text-amber-600'><Loader2 className='w-3 h-3 animate-spin' /> Thinking...</span>
+              <span className='inline-flex items-center gap-1.5 text-[11px] text-amber-600'><Loader2 className='w-3 h-3 animate-spin' /> Thinking…</span>
             ) : status === 'playing' && isPlayerTurn ? (
-              <span className='text-xs text-emerald-600 font-medium'>Your turn</span>
+              <span className='text-[11px] text-emerald-600 font-medium'>Your turn</span>
             ) : null}
           </div>
 
-          <div className='flex items-center gap-3'>
+          {/* Right — score, move #, analysis toggle */}
+          <div className='flex items-center gap-2.5'>
             {gameMode === 'scoring' && playerScore && aiScore && (
-              <div className='flex items-center gap-2 text-xs font-mono'>
+              <div className='flex items-center gap-1.5 text-[11px] font-mono'>
                 <span className={cn('font-bold', playerScore.total > aiScore.total ? 'text-emerald-600' : 'text-muted-foreground')}>{playerScore.total}</span>
                 <span className='text-muted-foreground/50'>:</span>
-                <span className={cn('font-bold', aiScore.total > playerScore.total ? 'text-slate-700' : 'text-muted-foreground')}>{aiScore.total}</span>
+                <span className={cn('font-bold', aiScore.total > playerScore.total ? 'text-slate-700 dark:text-slate-300' : 'text-muted-foreground')}>{aiScore.total}</span>
               </div>
             )}
-            <span className='text-[10px] text-muted-foreground font-mono'>#{moveHistory.length}</span>
+            <span className='text-[9px] text-muted-foreground font-mono'>#{moveHistory.length}</span>
+            <span
+              role='button'
+              tabIndex={0}
+              aria-expanded={visible}
+              aria-label={visible ? 'Collapse analysis' : 'Expand analysis'}
+              onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.stopPropagation(); onTogglePin(); } }}
+              onClick={(e) => { e.stopPropagation(); onTogglePin(); }}
+              className='flex items-center gap-1 text-[9px] font-bold uppercase tracking-wider text-muted-foreground hover:text-foreground transition-colors cursor-pointer'
+            >
+              <Eye className='w-3 h-3' />
+              <span className='hidden sm:inline'>Analysis</span>
+              <ChevronUp className={cn('w-3 h-3 transition-transform duration-200', visible && 'rotate-180')} />
+            </span>
           </div>
         </div>
-
-        {/* Expand/collapse toggle */}
-        {analysis && (
-          <button
-            onClick={() => setExpanded(!expanded)}
-            className='w-full flex items-center justify-center gap-1.5 py-1 text-[10px] text-muted-foreground hover:text-foreground transition-colors cursor-pointer'
-          >
-            <Eye className='w-3 h-3' />
-            <span className='font-medium uppercase tracking-wider'>Analysis</span>
-            <ChevronRight className={cn('w-3 h-3 transition-transform duration-200', expanded && 'rotate-90')} />
-          </button>
-        )}
-
-        {/* Expandable analysis content */}
-        <AnimatePresence>
-          {expanded && analysis && (
-            <motion.div
-              initial={{ height: 0, opacity: 0 }}
-              animate={{ height: 'auto', opacity: 1 }}
-              exit={{ height: 0, opacity: 0 }}
-              transition={{ duration: 0.25 }}
-              className='overflow-hidden'
-            >
-              <div className='px-2 pb-2 max-h-[36vh] overflow-y-auto scrollbar-thin'>
-                <AnalysisPanel />
-              </div>
-            </motion.div>
-          )}
-        </AnimatePresence>
-
-        {/* Footer text — always visible */}
-        <div className='border-t border-white/30 px-3 py-0.5'>
-          <p className='text-[9px] text-muted-foreground/70 text-center py-0.5'>MCTS + RAVE (Gelly & Silver) · Neural-net blend (60/40) · Threat Classifier · Global learning</p>
-        </div>
-      </div>
-    </section>
+      </section>
+    </div>
   );
 }
